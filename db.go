@@ -44,6 +44,9 @@ var (
 
 	// ErrFn is returned when fn is nil.
 	ErrFn = errors.New("err fn")
+
+	// ErrBucketNotFound is returned when looking for bucket that does not exist
+	ErrBucketNotFound = errors.New("bucket not found")
 )
 
 const (
@@ -319,7 +322,22 @@ func (db *DB) Merge() error {
 					break
 				}
 
+				var skipEntry bool
+
 				if db.isFilterEntry(entry) {
+					skipEntry = true
+				}
+
+				// check if we have a new entry with same key and bucket
+				if r, _ := db.getRecordFromKey(entry.Meta.bucket, entry.Key); r != nil && !skipEntry {
+					if r.H.fileID > int64(pendingMergeFId) {
+						skipEntry = true
+					} else if r.H.fileID == int64(pendingMergeFId) && r.H.dataPos > uint64(off) {
+						skipEntry = true
+					}
+				}
+
+				if skipEntry {
 					off += entry.Size()
 					if off >= db.opt.SegmentSize {
 						break
@@ -547,10 +565,15 @@ func (db *DB) buildBPTreeRootIdxes(dataFileIds []int) error {
 	}
 
 	for i := 0; i < len(dataFileIds[0:dataFileIdsSize-1]); i++ {
-		fID := dataFileIds[i]
 		off = 0
+		path := db.getBPTRootPath(int64(dataFileIds[i]))
+		fd, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
+		if err != nil {
+			return err
+		}
+
 		for {
-			bs, err := ReadBPTreeRootIdxAt(db.getBPTRootPath(int64(fID)), off)
+			bs, err := ReadBPTreeRootIdxAt(fd, off)
 			if err == io.EOF || err == nil && bs == nil {
 				break
 			}
@@ -564,6 +587,8 @@ func (db *DB) buildBPTreeRootIdxes(dataFileIds []int) error {
 			}
 
 		}
+
+		fd.Close()
 	}
 
 	db.committedTxIds = nil
@@ -770,8 +795,11 @@ func (db *DB) buildListIdx(bucket string, r *Record) error {
 	case DataRPushFlag:
 		_, _ = db.ListIdx[bucket].RPush(string(r.E.Key), r.E.Value)
 	case DataLRemFlag:
-		count, _ := strconv2.StrToInt(string(r.E.Value))
-		if _, err := db.ListIdx[bucket].LRem(string(r.E.Key), count); err != nil {
+		countAndValueIndex := strings.Split(string(r.E.Value), SeparatorForListKey)
+		count, _ := strconv2.StrToInt(countAndValueIndex[0])
+		value := []byte(countAndValueIndex[1])
+
+		if _, err := db.ListIdx[bucket].LRem(string(r.E.Key), count, value); err != nil {
 			return ErrWhenBuildListIdx(err)
 		}
 	case DataLPopFlag:
@@ -951,6 +979,9 @@ func (db *DB) getPendingMergeEntries(entry *Entry, pendingMergeEntries []*Entry)
 }
 
 func (db *DB) reWriteData(pendingMergeEntries []*Entry) error {
+	if len(pendingMergeEntries) == 0 {
+		return nil
+	}
 	tx, err := db.Begin(true)
 	if err != nil {
 		db.isMerging = false
@@ -987,4 +1018,18 @@ func (db *DB) isFilterEntry(entry *Entry) bool {
 	}
 
 	return false
+}
+
+// getRecordFromKey fetches Record for given key and bucket
+// this is a helper function used in Merge so it does not work if index mode is HintBPTSparseIdxMode
+func (db *DB) getRecordFromKey(bucket, key []byte) (record *Record, err error) {
+	idxMode := db.opt.EntryIdxMode
+	if !(idxMode == HintKeyValAndRAMIdxMode || idxMode == HintKeyAndRAMIdxMode) {
+		return nil, errors.New("not implemented")
+	}
+	idx, ok := db.BPTreeIdx[string(bucket)]
+	if !ok {
+		return nil, ErrBucketNotFound
+	}
+	return idx.Find(key)
 }

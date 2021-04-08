@@ -51,6 +51,9 @@ var (
 	// ErrPrefixScan is returned when prefix scanning not found the result
 	ErrPrefixScan = errors.New("prefix scans not found")
 
+	// ErrPrefixSearchScan is returned when prefix and search scanning not found the result
+	ErrPrefixSearchScan = errors.New("prefix and search scans not found")
+
 	// ErrNotFoundKey is returned when key not found int the bucket on an view function.
 	ErrNotFoundKey = errors.New("key not found in the bucket")
 )
@@ -435,8 +438,11 @@ func (tx *Tx) buildListIdx(bucket string, entry *Entry) {
 	case DataRPushFlag:
 		_, _ = tx.db.ListIdx[bucket].RPush(string(key), value)
 	case DataLRemFlag:
-		count, _ := strconv2.StrToInt(string(value))
-		_, _ = tx.db.ListIdx[bucket].LRem(string(key), count)
+		countAndValue := strings.Split(string(value), SeparatorForListKey)
+		count, _ := strconv2.StrToInt(countAndValue[0])
+		newValue := countAndValue[1]
+
+		_, _ = tx.db.ListIdx[bucket].LRem(string(key), count, []byte(newValue))
 	case DataLPopFlag:
 		_, _ = tx.db.ListIdx[bucket].LPop(string(key))
 	case DataRPopFlag:
@@ -554,6 +560,10 @@ func (tx *Tx) unlock() {
 	} else {
 		tx.db.mu.RUnlock()
 	}
+}
+
+func (tx *Tx) PutWithTimestamp(bucket string, key, value []byte, ttl uint32, timestamp uint64) error {
+	return tx.put(bucket, key, value, ttl, DataSetFlag, timestamp, DataStructureBPTree)
 }
 
 // Put sets the value for a key in the bucket.

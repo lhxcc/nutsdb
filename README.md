@@ -40,6 +40,7 @@ In order to break the limitation, I tried to optimize them. Finally, I did it an
   - [Using TTL(Time To Live)](#using-ttltime-to-live)
   - [Iterating over keys](#iterating-over-keys)
     - [Prefix scans](#prefix-scans)
+    - [Prefix search scans](#prefix-search-scans)
     - [Range scans](#range-scans)
     - [Get all](#get-all)
   - [Merge Operation](#merge-operation)
@@ -54,9 +55,9 @@ In order to break the limitation, I tried to optimize them. Finally, I did it an
      - [RPeek](#rpeek)
      - [LRange](#lrange)
      - [LRem](#lrem)
-     - [LSet](#lset)	
+     - [LSet](#lset)
      - [Ltrim](#ltrim)
-     - [LSize](#lsize)  	
+     - [LSize](#lsize)
    - [Set](#set)
      - [SAdd](#sadd)
      - [SAreMembers](#saremembers)
@@ -283,6 +284,8 @@ if err := db.Update(
 
 ```
 
+Also, this bucket is related to the data structure you use. Different data index structures that use the same bucket are also different. For example, you define a bucket named `bucket_foo`, so you need to use the `list` data structure, use `tx.RPush` to add data, you must query or retrieve from this bucket_foo data structure, use `tx.RPop`, `tx.LRange`, etc. You cannot use `tx.Get` (same index type as `tx.GetAll`, `tx.Put`, `tx.Delete`, `tx.RangeScan`, etc.) to read the data in this `bucket_foo`, because the index structure is different. Other data structures such as `Set`, `Sorted Set` are the same.
+
 ### Using key/value pairs
 
 To save a key/value pair to a bucket, use the `tx.Put` method:
@@ -385,7 +388,7 @@ NutsDB stores its keys in byte-sorted order within a bucket. This makes sequenti
 
 #### Prefix scans
 
-To iterate over a key prefix, we can use `PrefixScan` function, and the paramter `limitNum` constrain the number of entries returned :
+To iterate over a key prefix, we can use `PrefixScan` function, and the parameters `offsetNum` and `limitNum` constrain the number of entries returned :
 
 ```golang
 
@@ -394,7 +397,33 @@ if err := db.View(
 		prefix := []byte("user_")
 		bucket := "user_list"
 		// Constrain 100 entries returned 
-		if entries, err := tx.PrefixScan(bucket, prefix, 100); err != nil {
+		if entries, _, err := tx.PrefixScan(bucket, prefix, 25, 100); err != nil {
+			return err
+		} else {
+			for _, entry := range entries {
+				fmt.Println(string(entry.Key), string(entry.Value))
+			}
+		}
+		return nil
+	}); err != nil {
+		log.Fatal(err)
+}
+
+```
+
+#### Prefix search scans
+
+To iterate over a key prefix with search by regular expression on a second part of key without prefix, we can use `PrefixSearchScan` function, and the parameters `offsetNum`, `limitNum` constrain the number of entries returned :
+
+```golang
+
+if err := db.View(
+	func(tx *nutsdb.Tx) error {
+		prefix := []byte("user_")
+		reg := "username"
+		bucket := "user_list"
+		// Constrain 100 entries returned 
+		if entries, _, err := tx.PrefixSearchScan(bucket, prefix, reg, 25, 100); err != nil {
 			return err
 		} else {
 			for _, entry := range entries {
@@ -625,6 +654,8 @@ if err := db.View(
 ```
 ##### LRem 
 
+Note: This feature can be used starting from v0.6.0
+
 Removes the first count occurrences of elements equal to value from the list stored in the bucket at given bucket,key,count.
 The count argument influences the operation in the following ways:
 
@@ -637,7 +668,7 @@ if err := db.Update(
 	func(tx *nutsdb.Tx) error {
 	        bucket := "bucketForList"
 		key := []byte("myList")
-		return tx.LRem(bucket, key, 1)
+		return tx.LRem(bucket, key, 1, []byte("value11))
 	}); err != nil {
 	log.Fatal(err)
 }
