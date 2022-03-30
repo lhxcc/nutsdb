@@ -1037,6 +1037,18 @@ func TestDB_Backup(t *testing.T) {
 	}
 }
 
+func TestDB_BackupTarGZ(t *testing.T) {
+	InitOpt("", false)
+	db, err = Open(opt)
+	path := "/tmp/nutsdbtest_backup.tar.gz"
+	f, _ := os.Create(path)
+	defer f.Close()
+	err = db.BackupTarGZ(f)
+	if err != nil {
+		t.Error("err TestDB_Backup")
+	}
+}
+
 func TestDB_Close(t *testing.T) {
 	InitOpt("", false)
 	db, err = Open(opt)
@@ -1079,8 +1091,8 @@ func Test_getRecordFromKey(t *testing.T) {
 	if err != nil {
 		t.Errorf("wanted nil, got %v", err)
 	}
-	if r.H.dataPos != 58 || r.H.fileID != 4 {
-		t.Errorf("wanted fileID: %d, got: %d\nwanted dataPos: %d, got: %d", 4, r.H.fileID, 58, r.H.dataPos)
+	if r.H.DataPos != 58 || r.H.FileID != 4 {
+		t.Errorf("wanted fileID: %d, got: %d\nwanted dataPos: %d, got: %d", 4, r.H.FileID, 58, r.H.DataPos)
 	}
 	err = db.Close()
 	if err != nil {

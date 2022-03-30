@@ -20,30 +20,30 @@ import (
 )
 
 var (
-	filepath string
+	filePath string
 	entry    Entry
 )
 
 func init() {
-	filepath = "/tmp/foo"
+	filePath = "/tmp/foo"
 	entry = Entry{
 		Key:   []byte("key_0001"),
 		Value: []byte("val_0001"),
 		Meta: &MetaData{
-			keySize:    uint32(len("key_0001")),
-			valueSize:  uint32(len("val_0001")),
-			timestamp:  1547707905,
+			KeySize:    uint32(len("key_0001")),
+			ValueSize:  uint32(len("val_0001")),
+			Timestamp:  1547707905,
 			TTL:        Persistent,
-			bucket:     []byte("test_DataFile"),
-			bucketSize: uint32(len("test_datafile")),
+			Bucket:     []byte("test_DataFile"),
+			BucketSize: uint32(len("test_datafile")),
 			Flag:       DataSetFlag,
 		},
 		position: 0,
 	}
 }
 func TestDataFile_Err(t *testing.T) {
-	_, err := NewDataFile(filepath, -1, FileIO)
-	defer os.Remove(filepath)
+	_, err := NewDataFile(filePath, -1, FileIO)
+	defer os.Remove(filePath)
 
 	if err == nil {
 		t.Error("err invalid argument")
@@ -52,11 +52,12 @@ func TestDataFile_Err(t *testing.T) {
 }
 
 func TestDataFile1(t *testing.T) {
-	df, err := NewDataFile(filepath, 1024, MMap)
-	defer df.rwManager.Close()
+	df, err := NewDataFile(filePath, 1024, MMap)
+	defer os.Remove(filePath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer df.rwManager.Close()
 
 	n, err := df.WriteAt(entry.Encode(), 0)
 	if err != nil {
@@ -69,7 +70,7 @@ func TestDataFile1(t *testing.T) {
 	}
 
 	e, err = df.ReadAt(0)
-	if err != nil || string(e.Key) != "key_0001" || string(e.Value) != "val_0001" || e.Meta.timestamp != 1547707905 {
+	if err != nil || string(e.Key) != "key_0001" || string(e.Value) != "val_0001" || e.Meta.Timestamp != 1547707905 {
 		t.Error("err TestDataFile_All ReadAt")
 	}
 
@@ -80,13 +81,14 @@ func TestDataFile1(t *testing.T) {
 }
 
 func TestDataFile2(t *testing.T) {
-	filepath2 := "/tmp/foo2"
-	df, err := NewDataFile(filepath2, 39, FileIO)
-	defer df.rwManager.Close()
-	defer os.Remove(filepath2)
+	filePath2 := "/tmp/foo2"
+	df, err := NewDataFile(filePath2, 39, FileIO)
+	defer os.Remove(filePath2)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer df.rwManager.Close()
+
 	content := entry.Encode()[0 : DataEntryHeaderSize-1]
 	_, err = df.WriteAt(content, 0)
 	if err != nil {
@@ -98,12 +100,14 @@ func TestDataFile2(t *testing.T) {
 		t.Error("err TestDataFile_All ReadAt")
 	}
 
-	filepath3 := "/tmp/foo3"
-	df, err = NewDataFile(filepath3, 41, FileIO)
-	defer os.Remove(filepath3)
+	filePath3 := "/tmp/foo3"
+	df, err = NewDataFile(filePath3, 41, FileIO)
+	defer os.Remove(filePath3)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer df.Close()
+
 	content = entry.Encode()[0 : DataEntryHeaderSize+1]
 	_, err = df.WriteAt(content, 0)
 	if err != nil {
@@ -117,10 +121,12 @@ func TestDataFile2(t *testing.T) {
 }
 
 func TestDataFile_ReadAt(t *testing.T) {
-	df, err := NewDataFile(filepath, 1024, FileIO)
+	df, err := NewDataFile(filePath, 1024, FileIO)
+	defer os.Remove(filePath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer df.Close()
 
 	e, err := df.ReadAt(0)
 	if err != nil && e != nil {
@@ -134,21 +140,23 @@ func TestDataFile_ReadAt(t *testing.T) {
 }
 
 func TestDataFile_Err_Path(t *testing.T) {
-	filepath5 := ":/tmp/foo5"
-	df, err := NewDataFile(filepath5, entry.Size(), FileIO)
+	filePath5 := ":/tmp/foo5"
+	df, err := NewDataFile(filePath5, entry.Size(), FileIO)
 	if err == nil && df != nil {
 		t.Error("err TestDataFile_All open")
 	}
 }
 
 func TestDataFile_Crc_Err(t *testing.T) {
-	filepath4 := "/tmp/foo4"
+	filePath4 := "/tmp/foo4"
 
-	df, err := NewDataFile(filepath4, entry.Size(), FileIO)
-	defer os.Remove(filepath4)
+	df, err := NewDataFile(filePath4, entry.Size(), FileIO)
+	defer os.Remove(filePath4)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer df.Close()
+
 	var errContent []byte
 	errContent = append(errContent, entry.Encode()[0:4]...)
 	errContent = append(errContent, entry.Encode()[4:entry.Size()-1]...)

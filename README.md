@@ -1,3 +1,7 @@
+<p align="center">
+    <img src="https://user-images.githubusercontent.com/6065007/141310364-62d7eebb-2cbb-4949-80ed-5cd20f705405.png">
+</p>
+
 # NutsDB [![GoDoc](https://godoc.org/github.com/xujiajun/nutsdb?status.svg)](https://godoc.org/github.com/xujiajun/nutsdb)  [![Go Report Card](https://goreportcard.com/badge/github.com/xujiajun/nutsdb)](https://goreportcard.com/report/github.com/xujiajun/nutsdb) <a href="https://travis-ci.org/xujiajun/nutsdb"><img src="https://travis-ci.org/xujiajun/nutsdb.svg?branch=master" alt="Build Status"></a> [![Coverage Status](https://coveralls.io/repos/github/xujiajun/nutsdb/badge.svg?branch=master)](https://coveralls.io/github/xujiajun/nutsdb?branch=master) [![License](http://img.shields.io/badge/license-Apache_2-blue.svg?style=flat-square)](https://raw.githubusercontent.com/xujiajun/nutsdb/master/LICENSE) [![Mentioned in Awesome Go](https://awesome.re/mentioned-badge.svg)](https://github.com/avelino/awesome-go#database)  
 
 English | [简体中文](https://github.com/xujiajun/nutsdb/blob/master/README-CN.md)
@@ -36,6 +40,8 @@ In order to break the limitation, I tried to optimize them. Finally, I did it an
     - [Read-only transactions](#read-only-transactions)
     - [Managing transactions manually](#managing-transactions-manually)
   - [Using buckets](#using-buckets)
+    - [Delete bucket](#delete-bucket)
+    - [Iterate buckets](#iterate-buckets)
   - [Using key/value pairs](#using-keyvalue-pairs)
   - [Using TTL(Time To Live)](#using-ttltime-to-live)
   - [Iterating over keys](#iterating-over-keys)
@@ -45,6 +51,7 @@ In order to break the limitation, I tried to optimize them. Finally, I did it an
     - [Get all](#get-all)
   - [Merge Operation](#merge-operation)
   - [Database backup](#database-backup)
+- [Using in memory mode](#using-in-memory-mode)
 - [Using Other data structures](#using-other-data-structures)
    - [List](#list)
      - [RPush](#rpush)
@@ -157,7 +164,7 @@ FileIO represents the read and write mode using standard I/O. And MMap represent
 * SegmentSize          int64 
 
 NutsDB will truncate data file if the active file is larger than `SegmentSize`.
-Current verison default `SegmentSize` is 8MB,but you can custom it.
+Current version default `SegmentSize` is 8MB,but you can custom it.
 Once set, it cannot be changed. see [caveats--limitations](https://github.com/xujiajun/nutsdb#caveats--limitations) for detail.
 
 * NodeNum              int64
@@ -286,6 +293,61 @@ if err := db.Update(
 
 Also, this bucket is related to the data structure you use. Different data index structures that use the same bucket are also different. For example, you define a bucket named `bucket_foo`, so you need to use the `list` data structure, use `tx.RPush` to add data, you must query or retrieve from this bucket_foo data structure, use `tx.RPop`, `tx.LRange`, etc. You cannot use `tx.Get` (same index type as `tx.GetAll`, `tx.Put`, `tx.Delete`, `tx.RangeScan`, etc.) to read the data in this `bucket_foo`, because the index structure is different. Other data structures such as `Set`, `Sorted Set` are the same.
 
+#### Iterate buckets
+
+IterateBuckets iterate over all the bucket. IterateBuckets function has two parameters: `ds` and function `f`.
+
+The current version of the Iterate Buckets method supports the following EntryId Modes:
+
+* `HintKeyValAndRAMIdxMode`：represents ram index (key and value) mode.
+* `HintKeyAndRAMIdxMode`：represents ram index (only key) mode.
+
+The current version of `ds` (represents the data structure)：
+
+* DataStructureSet
+* DataStructureSortedSet
+* DataStructureBPTree
+* DataStructureList
+
+```go
+if err := db.View(
+	func(tx *nutsdb.Tx) error {
+		return tx.IterateBuckets(nutsdb.DataStructureBPTree, func(bucket string) {
+			fmt.Println("bucket: ", bucket)
+		})
+	}); err != nil {
+	log.Fatal(err)
+}
+	
+```
+
+#### Delete bucket
+
+DeleteBucket represents delete bucket. DeleteBucket function has two parameters: `ds`(represents the data structure) and `bucket`.
+
+The current version of the Iterate Buckets method supports the following EntryId Modes:
+
+* `HintKeyValAndRAMIdxMode`：represents ram index (key and value) mode.
+* `HintKeyAndRAMIdxMode`：represents ram index (only key) mode.
+
+The current version of `ds` (represents the data structure)：
+
+* DataStructureSet
+* DataStructureSortedSet
+* DataStructureBPTree
+* DataStructureList
+
+```go
+if err := db.Update(
+	func(tx *nutsdb.Tx) error {
+		return tx.DeleteBucket(nutsdb.DataStructureBPTree, bucket)
+	}); err != nil {
+	log.Fatal(err)
+}
+	
+```
+
+
 ### Using key/value pairs
 
 To save a key/value pair to a bucket, use the `tx.Put` method:
@@ -372,7 +434,7 @@ if err := db.Update(
 	val := []byte("val1")
 	bucket := "bucket1"
 	
-	// If set ttl = 0 or Persistent, this key will nerver expired.
+	// If set ttl = 0 or Persistent, this key will never expired.
 	// Set ttl = 60 , after 60 seconds, this key will expired.
 	if err := tx.Put(bucket, key, val, 60); err != nil {
 		return err
@@ -506,6 +568,51 @@ err = db.Backup(dir)
 if err != nil {
    ...
 }
+```
+
+NutsDB also provides gzip to compress backups. You can use the `db.BackupTarGZ()` function.
+
+```golang
+f, _ := os.Create(path)
+defer f.Close()
+err = db.BackupTarGZ(f)
+if err != nil {
+   ...
+}
+	
+```
+
+### Using in memory mode
+
+In-memory mode is supported since nutsdb 0.7.0.
+
+Run memory mode, after restarting the service, the data will be lost.
+
+
+
+```go
+
+opts := inmemory.DefaultOptions
+db, err := inmemory.Open(opts)
+if err != nil {
+    ...
+}
+bucket := "bucket1"
+key := []byte("key1")
+val := []byte("val1")
+err = db.Put(bucket, key, val, 0)
+if err != nil {
+    ...
+}
+
+entry, err := db.Get(bucket, key)
+if err != nil {
+    ...
+}
+
+fmt.Println("entry.Key", string(entry.Key))     // entry.Key key1
+fmt.Println("entry.Value", string(entry.Value)) // entry.Value val1
+
 ```
 
 ### Using other data structures
@@ -1833,7 +1940,7 @@ From the version v0.3.0, NutsDB supports two modes about entry index: `HintKeyVa
 The default mode use `HintKeyValAndRAMIdxMode`, entries are indexed base on RAM, so its read/write performance is fast. but can’t handle databases much larger than the available physical RAM. If you set the `HintKeyAndRAMIdxMode` mode, HintIndex will not cache the value of the entry. Its write performance is also fast. To retrieve a key by seeking to offset relative to the start of the data file, so its read performance more slowly that RAM way, but it can save memory. The mode `HintBPTSparseIdxMode` is based b+ tree sparse index, this mode saves memory very much (1 billion data only uses about 80MB of memory). And other data structures such as ***list, set, sorted set only supported with mode HintKeyValAndRAMIdxMode***.
 ***It cannot switch back and forth between modes because the index structure is different***.
 
-NutsDB will truncate data file if the active file is larger than  `SegmentSize`, so the size of an entry can not be set larger than `SegmentSize` , defalut `SegmentSize` is 8MB, you can set it(opt.SegmentSize) as option before DB opening. ***Once set, it cannot be changed***.
+NutsDB will truncate data file if the active file is larger than  `SegmentSize`, so the size of an entry can not be set larger than `SegmentSize` , default `SegmentSize` is 8MB, you can set it(opt.SegmentSize) as option before DB opening. ***Once set, it cannot be changed***.
 
 #### Support OS
 

@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"hash/crc32"
 	"os"
+	"path/filepath"
 	"sort"
 )
 
@@ -122,11 +123,11 @@ func ReadBPTreeRootIdxAt(fd *os.File, off int64) (*BPTreeRootIdx, error) {
 
 // Persistence writes BPTreeRootIdx entry to the File starting at byte offset off.
 func (bri *BPTreeRootIdx) Persistence(path string, offset int64, syncEnable bool) (number int, err error) {
-	fd, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
-	defer fd.Close()
+	fd, err := os.OpenFile(filepath.Clean(path), os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return 0, err
 	}
+	defer fd.Close()
 
 	data := bri.Encode()
 

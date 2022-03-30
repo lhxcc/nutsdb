@@ -1,3 +1,7 @@
+<p align="center">
+    <img src="https://user-images.githubusercontent.com/6065007/141310364-62d7eebb-2cbb-4949-80ed-5cd20f705405.png">
+</p>
+
 # NutsDB [![GoDoc](https://godoc.org/github.com/xujiajun/nutsdb?status.svg)](https://godoc.org/github.com/xujiajun/nutsdb)  [![Go Report Card](https://goreportcard.com/badge/github.com/xujiajun/nutsdb)](https://goreportcard.com/report/github.com/xujiajun/nutsdb) <a href="https://travis-ci.org/xujiajun/nutsdb"><img src="https://travis-ci.org/xujiajun/nutsdb.svg?branch=master" alt="Build Status"></a> [![Coverage Status](https://coveralls.io/repos/github/xujiajun/nutsdb/badge.svg?branch=master)](https://coveralls.io/github/xujiajun/nutsdb?branch=master) [![License](http://img.shields.io/badge/license-Apache_2-blue.svg?style=flat-square)](https://raw.githubusercontent.com/xujiajun/nutsdb/master/LICENSE) [![Mentioned in Awesome Go](https://awesome.re/mentioned-badge.svg)](https://github.com/avelino/awesome-go#database)  
 
 [English](https://github.com/xujiajun/nutsdb/blob/master/README.md) | 简体中文
@@ -5,6 +9,9 @@
 NutsDB是纯Go语言编写一个简单、高性能、内嵌型、持久化的key-value数据库。
 
 NutsDB支持事务，从v0.2.0之后的版本开始支持ACID的特性，建议使用最新的release版本。v0.2.0之前的版本，保持高性能，没有作sync，但是具备高性能的写（本地测试，百万数据写入达40~50W+/s）。所有的操作都在事务中执行。NutsDB从v0.2.0版本开始支持多种数据结构，如列表(list)、集合(set)、有序集合(sorted set)。从0.4.0版本开始增加自定义配置读写方式、启动时候的文件载入方式、sync是否开启等，详情见[选项配置](https://github.com/xujiajun/nutsdb/blob/master/README-CN.md#%E9%80%89%E9%A1%B9%E9%85%8D%E7%BD%AE)
+
+> 欢迎对NutsDB感兴趣的加群、一起开发，具体看这个issue：https://github.com/nutsdb/nutsdb/issues/116
+
 
 ## 为什么有NutsDB
 
@@ -59,6 +66,8 @@ Badger同样是基于LSM tree，不同的是他把key/value分离。据他官网
     - [只读事务](#只读事务)
     - [手动管理事务](#手动管理事务)
   - [使用buckets](#使用buckets)
+    - [迭代buckets](#迭代buckets)
+    - [删除bucket](#删除bucket)
   - [使用键值对](#使用键值对)
   - [使用TTL](#使用ttl)
   - [对keys的扫描操作](#对keys的扫描操作)
@@ -68,6 +77,7 @@ Badger同样是基于LSM tree，不同的是他把key/value分离。据他官网
     - [获取全部的key和value](#获取全部的key和value)
   - [合并操作](#合并操作)
   - [数据库备份](#数据库备份)
+- [使用内存模式](#使用内存模式)
 - [使用其他数据结构](#使用其他数据结构)
    - [List](#list)
      - [RPush](#rpush)
@@ -206,6 +216,9 @@ MB，这个可以自己配置。但是一旦被设置，下次启动数据库也
 
 推荐使用默认选项的方式。兼顾了持久化+快速的启动数据库。当然具体还要看你场景的要求。
 
+> 以下配置是比较保守的方式。
+> 如果你对写性能要求比较高，可以设置SyncEnable等于false，RWMode改成MMap，写性能会得到极大提升，缺点是可能会丢数据（例如遇到断电或者系统奔溃）
+
 ```
 var DefaultOptions = Options{
 	EntryIdxMode:         HintKeyValAndRAMIdxMode,
@@ -315,6 +328,50 @@ if err := db.Update(
 
 ```
 这边注意下，这个bucket和你使用数据结构有关，不同数据索引结构，用同一个bucket，也是不同的。比如你定义了一个bucket，命名为`bucket_foo`，比如你要用`list`这个数据结构，使用 `tx.RPush`加数据，必须对应他的数据结构去从这个`bucket_foo`查询或者取出，比如用 `tx.RPop`，`tx.LRange` 等，不能用`tx.Get`（和GetAll、Put、Delete、RangeScan等同一索引类型）去读取这个`bucket_foo`里面的数据，因为索引结构不同。其他数据结构如`Set`、`Sorted Set`同理。
+
+下面说明下迭代buckets 和 删除bucket。它们都用到了`ds`。
+
+ds表示数据结构，支持如下：
+* DataStructureSet
+* DataStructureSortedSet
+* DataStructureBPTree
+* DataStructureList
+
+目前支持的`EntryIdxMode`如下：
+
+* HintKeyValAndRAMIdxMode 
+* HintKeyAndRAMIdxMode 
+
+#### 迭代buckets
+
+IterateBuckets支持迭代指定ds的迭代。
+
+```go
+
+if err := db.View(
+	func(tx *nutsdb.Tx) error {
+		return tx.IterateBuckets(nutsdb.DataStructureBPTree, func(bucket string) {
+			fmt.Println("bucket: ", bucket)
+		})
+	}); err != nil {
+	log.Fatal(err)
+}
+```
+
+#### 删除bucket
+
+DeleteBucket支持删除指定的bucket，需要两个参数`ds`和`bucket`。
+
+```go
+
+if err := db.Update(
+	func(tx *nutsdb.Tx) error {
+		return tx.DeleteBucket(nutsdb.DataStructureBPTree, bucket)
+	}); err != nil {
+	log.Fatal(err)
+}
+```
+
 
 ### 使用键值对
 
@@ -551,7 +608,50 @@ if err != nil {
 }
 ```
 
+NutsDB还提供gzip的压缩备份：
+
+```golang
+f, _ := os.Create(path)
+defer f.Close()
+err = db.BackupTarGZ(f)
+if err != nil {
+   ...
+}
+
+```
+
 好了，入门指南已经完结。 散花~，到目前为止都是String类型的数据的crud操作，下面将学习其他更多的数据结构的操作。
+
+### 使用内存模式
+
+NutsDB从0.7.0版本开始支持内存模式，这个模式下，重启数据库，数据会丢失的。
+
+例子：
+
+```go
+
+	opts := inmemory.DefaultOptions
+	db, err := inmemory.Open(opts)
+	if err != nil {
+		panic(err)
+	}
+	bucket := "bucket1"
+	key := []byte("key1")
+	val := []byte("val1")
+	err = db.Put(bucket, key, val, 0)
+	if err != nil {
+		fmt.Println("err", err)
+	}
+
+	entry, err := db.Get(bucket, key)
+	if err != nil {
+		fmt.Println("err", err)
+	}
+
+	fmt.Println("entry.Key", string(entry.Key))     // entry.Key key1
+	fmt.Println("entry.Value", string(entry.Value)) // entry.Value val1
+	
+```
 
 ### 使用其他数据结构
 

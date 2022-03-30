@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"hash/crc32"
 	"os"
+	"path/filepath"
 )
 
 const (
@@ -71,11 +72,11 @@ func (bm *BucketMeta) Size() int64 {
 // ReadBucketMeta returns bucketMeta at given file path name.
 func ReadBucketMeta(name string) (bucketMeta *BucketMeta, err error) {
 	var off int64
-	fd, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR, 0644)
-	defer fd.Close()
+	fd, err := os.OpenFile(filepath.Clean(name), os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return
 	}
+	defer fd.Close()
 
 	buf := make([]byte, BucketMetaHeaderSize)
 	_, err = fd.ReadAt(buf, off)
