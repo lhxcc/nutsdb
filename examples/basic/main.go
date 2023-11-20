@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/xujiajun/nutsdb"
+	"github.com/nutsdb/nutsdb"
 )
 
 var (
@@ -15,7 +15,6 @@ var (
 )
 
 func init() {
-	opt := nutsdb.DefaultOptions
 	fileDir := "/tmp/nutsdb_example"
 
 	files, _ := ioutil.ReadDir(fileDir)
@@ -29,31 +28,33 @@ func init() {
 			}
 		}
 	}
-	opt.Dir = fileDir
-	opt.SegmentSize = 1024 * 1024 // 1MB
-	db, _ = nutsdb.Open(opt)
+	db, _ = nutsdb.Open(
+		nutsdb.DefaultOptions,
+		nutsdb.WithDir(fileDir),
+		nutsdb.WithSegmentSize(1024*1024), // 1MB
+	)
 	bucket = "bucketForString"
 }
 
 func main() {
-	//insert
+	// insert
 	put()
-	//read
+	// read
 	read()
 
-	//delete
+	// delete
 	delete()
-	//read
+	// read
 	read()
 
-	//insert
+	// insert
 	put()
-	//read
+	// read
 	read()
 
-	//update
+	// update
 	put2()
-	//read
+	// read
 	read()
 }
 

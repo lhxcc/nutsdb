@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/xujiajun/nutsdb"
+	"github.com/nutsdb/nutsdb"
 )
 
 var (
@@ -12,11 +12,12 @@ var (
 )
 
 func init() {
-	opt := nutsdb.DefaultOptions
-	//opt.RWMode = nutsdb.MMap
-	//opt.SyncEnable = false
-	opt.Dir = "/tmp/nutsdbexample/example_bucket"
-	db, _ = nutsdb.Open(opt)
+	db, _ = nutsdb.Open(
+		nutsdb.DefaultOptions,
+		nutsdb.WithDir("/tmp/nutsdbexample/example_bucket"),
+		// nutsdb.WithRWMode(nutsdb.MMap),
+		// nutsdb.WithSyncEnable(false),
+	)
 }
 
 func main() {
@@ -39,7 +40,7 @@ func main() {
 	bucket := "bucket_003"
 	if err := db.Update(
 		func(tx *nutsdb.Tx) error {
-			return tx.DeleteBucket(nutsdb.DataStructureBPTree, bucket)
+			return tx.DeleteBucket(nutsdb.DataStructureBTree, bucket)
 		}); err != nil {
 		log.Fatal(err)
 	}
@@ -50,8 +51,9 @@ func main() {
 func iterateBuckets() {
 	if err := db.View(
 		func(tx *nutsdb.Tx) error {
-			return tx.IterateBuckets(nutsdb.DataStructureBPTree, func(bucket string) {
+			return tx.IterateBuckets(nutsdb.DataStructureBTree, "*", func(bucket string) bool {
 				fmt.Println("bucket: ", bucket)
+				return true
 			})
 		}); err != nil {
 		log.Fatal(err)

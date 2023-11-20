@@ -15,36 +15,117 @@
 package nutsdb
 
 import (
+	"encoding/binary"
+	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 )
 
-func TestEntry_All(t *testing.T) {
-	entry := Entry{
-		Key:   []byte("key_0001"),
-		Value: []byte("val_0001"),
-		Meta: &MetaData{
-			KeySize:    uint32(len("key_0001")),
-			ValueSize:  uint32(len("val_0001")),
-			Timestamp:  1547707905,
-			TTL:        Persistent,
-			Bucket:     []byte("test_entry"),
-			BucketSize: uint32(len("test_datafile")),
-			Flag:       DataSetFlag,
+type EntryTestSuite struct {
+	suite.Suite
+	entry          Entry
+	expectedEncode []byte
+}
+
+func (suite *EntryTestSuite) SetupSuite() {
+	suite.entry = Entry{
+		Key:    []byte("key_0001"),
+		Value:  []byte("val_0001"),
+		Bucket: []byte("test_entry"),
+		Meta: NewMetaData().WithKeySize(uint32(len("key_0001"))).
+			WithValueSize(uint32(len("val_0001"))).WithTimeStamp(1547707905).WithTTL(Persistent).
+			WithBucketSize(uint32(len("test_entry"))).WithFlag(DataSetFlag),
+	}
+	suite.expectedEncode = []byte{48, 176, 185, 16, 1, 38, 64, 92, 0, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 116, 101, 115, 116, 95, 101, 110, 116, 114, 121, 107, 101, 121, 95, 48, 48, 48, 49, 118, 97, 108, 95, 48, 48, 48, 49}
+}
+
+func (suite *EntryTestSuite) TestEncode() {
+	ok := reflect.DeepEqual(suite.entry.Encode(), suite.expectedEncode)
+	assert.True(suite.T(), ok, "entry's encode test fail")
+}
+
+func (suite *EntryTestSuite) TestIsZero() {
+
+	if ok := suite.entry.IsZero(); ok {
+		assert.Fail(suite.T(), "entry's IsZero test fail")
+	}
+
+}
+
+func (suite *EntryTestSuite) TestGetCrc() {
+
+	crc1 := suite.entry.GetCrc(suite.expectedEncode[:42])
+	crc2 := binary.LittleEndian.Uint32(suite.expectedEncode[:4])
+
+	if crc1 != crc2 {
+		assert.Fail(suite.T(), "entry's GetCrc test fail")
+	}
+}
+
+func TestEntrySuit(t *testing.T) {
+	suite.Run(t, new(EntryTestSuite))
+}
+
+func TestEntries_processEntriesScanOnDisk(t *testing.T) {
+	tests := []struct {
+		name       string
+		e          Entries
+		wantResult []*Entry
+	}{
+		{
+			"sort",
+			Entries{
+				{
+					Key:  []byte("abc"),
+					Meta: NewMetaData().WithTTL(0).WithFlag(DataSetFlag),
+				},
+				{
+					Key:  []byte("z"),
+					Meta: NewMetaData().WithTTL(0).WithFlag(DataSetFlag),
+				},
+				{
+					Key:  []byte("abcd"),
+					Meta: NewMetaData().WithTTL(0).WithFlag(DataSetFlag),
+				},
+			},
+			[]*Entry{
+				{
+					Key:  []byte("abc"),
+					Meta: NewMetaData().WithTTL(0).WithFlag(DataSetFlag),
+				},
+				{
+					Key:  []byte("abcd"),
+					Meta: NewMetaData().WithTTL(0).WithFlag(DataSetFlag),
+				},
+				{
+					Key:  []byte("z"),
+					Meta: NewMetaData().WithTTL(0).WithFlag(DataSetFlag),
+				},
+			},
 		},
-		position: 0,
+		{
+			"expired",
+			Entries{
+				{
+					Key:  []byte("abc"),
+					Meta: NewMetaData().WithTTL(1),
+				},
+				{
+					Key:  []byte("abc"),
+					Meta: NewMetaData().WithTTL(0).WithFlag(DataDeleteFlag),
+				},
+			},
+			nil,
+		},
 	}
-
-	expectedEncodeVal := []byte{172, 41, 40, 169, 1, 38, 64, 92, 0, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 116, 101, 115, 116, 95, 101, 110, 116, 114, 121, 0, 0, 0, 107, 101, 121, 95, 48, 48, 48, 49, 118, 97, 108, 95, 48, 48, 48, 49}
-
-	if string(expectedEncodeVal) != string(entry.Encode()) {
-		t.Errorf("err TestEntry_Encode got %s want %s", string(entry.Encode()), string(expectedEncodeVal))
-	}
-
-	if entry.IsZero() {
-		t.Errorf("err entry.IsZero got %v want %v", true, false)
-	}
-
-	if entry.GetCrc(entry.Encode()) != 529078050 {
-		t.Errorf("err entry.GetCrc got %d want %d", entry.GetCrc(entry.Encode()), 2777557425)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equalf(t, tt.wantResult, tt.e.processEntriesScanOnDisk(), "processEntriesScanOnDisk()")
+		})
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equalf(t, tt.wantResult, tt.e.ToCEntries(nil).processEntriesScanOnDisk(), "CEntries.processEntriesScanOnDisk()")
+		})
 	}
 }

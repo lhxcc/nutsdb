@@ -15,163 +15,74 @@
 package nutsdb
 
 import (
-	"fmt"
-	"io/ioutil"
-	"os"
-	"sort"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
-func InitForBucket() {
-	fileDir := "/tmp/nutsdbtestbuckettx"
-	files, _ := ioutil.ReadDir(fileDir)
-	for _, f := range files {
-		name := f.Name()
-		if name != "" {
-			err := os.RemoveAll(fileDir + "/" + name)
-			if err != nil {
-				panic(err)
-			}
-		}
-	}
+var (
+	setBucketName    = "set_bucket"
+	zSetBucketName   = "zset_bucket"
+	listBucketName   = "list_bucket"
+	stringBucketName = "string_bucket"
+)
 
-	opt = DefaultOptions
-	opt.Dir = fileDir
-	opt.SegmentSize = 8 * 1024
-	return
+func setupBucket(t *testing.T, db *DB) {
+	key := GetTestBytes(0)
+	val := GetTestBytes(1)
+
+	txSAdd(t, db, setBucketName, key, val, nil, nil)
+	txZAdd(t, db, zSetBucketName, key, val, 80, nil, nil)
+	txPush(t, db, listBucketName, key, val, true, nil, nil)
+	txPut(t, db, stringBucketName, key, val, Persistent, nil, nil)
 }
 
-func TestTx_DeleteBucket(t *testing.T) {
-	InitForBucket()
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestBucket_IterateBuckets(t *testing.T) {
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		setupBucket(t, db)
 
-	var expectedBuckets []string
+		txIterateBuckets(t, db, DataStructureNone, "*", nil, nil)
 
-	deleteBucketNum := 3
-	expectedDeleteBucketNum := "bucket" + fmt.Sprintf("%07d", deleteBucketNum)
-	//write tx begin
-	for i := 1; i <= 10; i++ {
-		tx, err := db.Begin(true)
-		if err != nil {
-			t.Fatal(err)
-		}
+		txIterateBuckets(t, db, DataStructureSet, "*", func(bucket string) bool {
+			return true
+		}, nil, setBucketName)
 
-		numStr := fmt.Sprintf("%07d", i)
-		bucket := "bucket" + numStr
-		key := []byte("key" + numStr)
-		val := []byte("val" + numStr)
-		if err = tx.Put(bucket, key, val, Persistent); err != nil {
-			//tx rollback
-			err = tx.Rollback()
-			t.Fatal(err)
-		} else {
-			//tx commit
-			tx.Commit()
-		}
+		txIterateBuckets(t, db, DataStructureSortedSet, "*", func(bucket string) bool {
+			return true
+		}, nil, zSetBucketName)
 
-		if bucket != expectedDeleteBucketNum {
-			expectedBuckets = append(expectedBuckets, bucket)
-		}
-	}
+		txIterateBuckets(t, db, DataStructureList, "*", func(bucket string) bool {
+			return true
+		}, nil, listBucketName)
 
-	//write tx begin
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
+		txIterateBuckets(t, db, DataStructureBTree, "*", func(bucket string) bool {
+			return true
+		}, nil, stringBucketName)
 
-	err = tx.DeleteBucket(DataStructureBPTree, expectedDeleteBucketNum)
-	if err != nil {
-		//tx rollback
-		tx.Rollback()
-		t.Fatal(err)
+		matched := false
+		txIterateBuckets(t, db, DataStructureBTree, "str*", func(bucket string) bool {
+			matched = true
+			return true
+		}, nil)
+		assert.Equal(t, true, matched)
 
-	} else {
-		//tx commit
-		tx.Commit()
-	}
-
-	//read tx begin
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var buckets []string
-	err = tx.IterateBuckets(DataStructureBPTree, func(bucket string) {
-		buckets = append(buckets, bucket)
+		matched = false
+		txIterateBuckets(t, db, DataStructureList, "str*", func(bucket string) bool {
+			return true
+		}, nil)
+		assert.Equal(t, false, matched)
 	})
-	if err != nil {
-		//tx rollback
-		err = tx.Rollback()
-		t.Fatal(err)
-	} else {
-		//tx commit
-		tx.Commit()
-	}
-
-	compareBuckets(t, expectedBuckets, buckets)
 }
 
-func TestTx_IterateBuckets(t *testing.T) {
-	InitForBucket()
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestBucket_DeleteBucket(t *testing.T) {
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		setupBucket(t, db)
 
-	//write tx begin
-	var expectedBuckets []string
-	for i := 1; i <= 10; i++ {
-		tx, err := db.Begin(true)
-		if err != nil {
-			t.Fatal(err)
-		}
+		txDeleteBucket(t, db, DataStructureSet, setBucketName, nil)
+		txDeleteBucket(t, db, DataStructureSortedSet, zSetBucketName, nil)
+		txDeleteBucket(t, db, DataStructureList, listBucketName, nil)
+		txDeleteBucket(t, db, DataStructureBTree, stringBucketName, nil)
 
-		numStr := fmt.Sprintf("%07d", i)
-		bucket := "bucket" + numStr
-		key := []byte("key" + numStr)
-		val := []byte("val" + numStr)
-		if err = tx.Put(bucket, key, val, Persistent); err != nil {
-			//tx rollback
-			err = tx.Rollback()
-			t.Fatal(err)
-		} else {
-			//tx commit
-			tx.Commit()
-		}
-
-		expectedBuckets = append(expectedBuckets, "bucket"+numStr)
-	}
-
-	//read tx begin
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var buckets []string
-	err = tx.IterateBuckets(DataStructureBPTree, func(bucket string) {
-		buckets = append(buckets, bucket)
+		txDeleteBucket(t, db, DataStructureNone, "none_bucket", ErrDataStructureNotSupported)
 	})
-	if err != nil {
-		//tx rollback
-		err = tx.Rollback()
-		t.Fatal(err)
-	} else {
-		//tx commit
-		tx.Commit()
-	}
-
-	compareBuckets(t, expectedBuckets, buckets)
-}
-
-func compareBuckets(t *testing.T, expectedBuckets, actualBuckets []string) {
-	sort.Strings(actualBuckets)
-	for i, expectedBucket := range expectedBuckets {
-		if actualBuckets[i] != expectedBucket {
-			t.Error("err IterateBuckets")
-		}
-	}
 }

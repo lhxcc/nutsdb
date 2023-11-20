@@ -15,7 +15,6 @@
 package nutsdb
 
 import (
-	"encoding/binary"
 	"errors"
 )
 
@@ -24,18 +23,24 @@ var (
 	ErrCrcZero = errors.New("error crc is 0")
 
 	// ErrCrc is returned when crc is error
-	ErrCrc = errors.New(" crc error")
+	ErrCrc = errors.New("crc error")
 
 	// ErrCapacity is returned when capacity is error.
 	ErrCapacity = errors.New("capacity error")
+
+	ErrEntryZero = errors.New("entry is zero ")
 )
+
+// DataEntryHeaderSize returns the entry header size
+var DataEntryHeaderSize int64
+
+func init() {
+	DataEntryHeaderSize = GetDiskSizeFromSingleObject(MetaData{})
+}
 
 const (
 	// DataSuffix returns the data suffix
 	DataSuffix = ".dat"
-
-	// DataEntryHeaderSize returns the entry header size
-	DataEntryHeaderSize = 42
 )
 
 // DataFile records about data file information.
@@ -47,34 +52,13 @@ type DataFile struct {
 	rwManager  RWManager
 }
 
-// NewDataFile returns a newly initialized DataFile object.
-func NewDataFile(path string, capacity int64, rwMode RWMode) (df *DataFile, err error) {
-	var rwManager RWManager
-
-	if capacity <= 0 {
-		return nil, ErrCapacity
+// NewDataFile will return a new DataFile Object.
+func NewDataFile(path string, rwManager RWManager) *DataFile {
+	dataFile := &DataFile{
+		path:      path,
+		rwManager: rwManager,
 	}
-
-	if rwMode == FileIO {
-		rwManager, err = NewFileIORWManager(path, capacity)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if rwMode == MMap {
-		rwManager, err = NewMMapRWManager(path, capacity)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return &DataFile{
-		path:       path,
-		writeOff:   0,
-		ActualSize: 0,
-		rwManager:  rwManager,
-	}, nil
+	return dataFile
 }
 
 // ReadAt returns entry at the given off(offset).
@@ -85,48 +69,69 @@ func (df *DataFile) ReadAt(off int) (e *Entry, err error) {
 		return nil, err
 	}
 
-	meta := readMetaData(buf)
-
-	e = &Entry{
-		crc:  binary.LittleEndian.Uint32(buf[0:4]),
-		Meta: meta,
+	e = NewEntry()
+	err = e.ParseMeta(buf)
+	if err != nil {
+		return nil, err
 	}
 
 	if e.IsZero() {
 		return nil, nil
 	}
 
-	// read bucket
-	off += DataEntryHeaderSize
-	bucketBuf := make([]byte, meta.BucketSize)
-	_, err = df.rwManager.ReadAt(bucketBuf, int64(off))
+	meta := e.Meta
+	off += int(DataEntryHeaderSize)
+	dataSize := meta.PayloadSize()
+
+	dataBuf := make([]byte, dataSize)
+	_, err = df.rwManager.ReadAt(dataBuf, int64(off))
 	if err != nil {
 		return nil, err
 	}
 
-	e.Meta.Bucket = bucketBuf
-
-	// read key
-	off += int(meta.BucketSize)
-	keyBuf := make([]byte, meta.KeySize)
-
-	_, err = df.rwManager.ReadAt(keyBuf, int64(off))
+	err = e.ParsePayload(dataBuf)
 	if err != nil {
 		return nil, err
 	}
-	e.Key = keyBuf
-
-	// read value
-	off += int(meta.KeySize)
-	valBuf := make([]byte, meta.ValueSize)
-	_, err = df.rwManager.ReadAt(valBuf, int64(off))
-	if err != nil {
-		return nil, err
-	}
-	e.Value = valBuf
 
 	crc := e.GetCrc(buf)
-	if crc != e.crc {
+	if crc != e.Meta.Crc {
+		return nil, ErrCrc
+	}
+
+	return
+}
+
+// ReadRecord returns entry at the given off(offset).
+// payloadSize = bucketSize + keySize + valueSize
+func (df *DataFile) ReadRecord(off int, payloadSize int64) (e *Entry, err error) {
+	buf := make([]byte, DataEntryHeaderSize+payloadSize)
+
+	if _, err := df.rwManager.ReadAt(buf, int64(off)); err != nil {
+		return nil, err
+	}
+
+	e = new(Entry)
+	err = e.ParseMeta(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	if e.IsZero() {
+		return nil, ErrEntryZero
+	}
+
+	if err := e.checkPayloadSize(payloadSize); err != nil {
+		return nil, err
+	}
+
+	err = e.ParsePayload(buf[DataEntryHeaderSize:])
+	if err != nil {
+		return nil, err
+	}
+
+	crc := e.GetCrc(buf[:DataEntryHeaderSize])
+	if crc != e.Meta.Crc {
 		return nil, ErrCrc
 	}
 
@@ -155,17 +160,6 @@ func (df *DataFile) Close() (err error) {
 	return df.rwManager.Close()
 }
 
-// readMetaData returns MetaData at given buf slice.
-func readMetaData(buf []byte) *MetaData {
-	return &MetaData{
-		Timestamp:  binary.LittleEndian.Uint64(buf[4:12]),
-		KeySize:    binary.LittleEndian.Uint32(buf[12:16]),
-		ValueSize:  binary.LittleEndian.Uint32(buf[16:20]),
-		Flag:       binary.LittleEndian.Uint16(buf[20:22]),
-		TTL:        binary.LittleEndian.Uint32(buf[22:26]),
-		BucketSize: binary.LittleEndian.Uint32(buf[26:30]),
-		Status:     binary.LittleEndian.Uint16(buf[30:32]),
-		Ds:         binary.LittleEndian.Uint16(buf[32:34]),
-		TxID:       binary.LittleEndian.Uint64(buf[34:42]),
-	}
+func (df *DataFile) Release() (err error) {
+	return df.rwManager.Release()
 }

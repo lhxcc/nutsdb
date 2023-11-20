@@ -18,10 +18,12 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"reflect"
+	"strconv"
 	"testing"
+	"time"
 
-	"github.com/xujiajun/utils/strconv2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -29,6 +31,82 @@ var (
 	opt Options
 	err error
 )
+
+const NutsDBTestDirPath = "/tmp/nutsdb-test"
+
+func assertErr(t *testing.T, err error, expectErr error) {
+	if expectErr != nil {
+		require.Equal(t, expectErr, err)
+	} else {
+		require.NoError(t, err)
+	}
+}
+
+func removeDir(dir string) {
+	if err := os.RemoveAll(dir); err != nil {
+		panic(err)
+	}
+}
+
+func runNutsDBTest(t *testing.T, opts *Options, test func(t *testing.T, db *DB)) {
+	if opts == nil {
+		opts = &DefaultOptions
+	}
+	if opts.Dir == "" {
+		opts.Dir = NutsDBTestDirPath
+	}
+	defer removeDir(opts.Dir)
+	db, err := Open(*opts)
+	require.NoError(t, err)
+
+	test(t, db)
+	t.Cleanup(func() {
+		if !db.IsClose() {
+			require.NoError(t, db.Close())
+		}
+	})
+}
+
+func txPut(t *testing.T, db *DB, bucket string, key, value []byte, ttl uint32, expectErr error, finalExpectErr error) {
+	err := db.Update(func(tx *Tx) error {
+		err = tx.Put(bucket, key, value, ttl)
+		assertErr(t, err, expectErr)
+		return nil
+	})
+	assertErr(t, err, finalExpectErr)
+}
+
+func txGet(t *testing.T, db *DB, bucket string, key []byte, expectVal []byte, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		e, err := tx.Get(bucket, key)
+		if expectErr != nil {
+			require.Equal(t, expectErr, err)
+		} else {
+			require.NoError(t, err)
+			require.EqualValuesf(t, expectVal, e.Value, "err Tx Get. got %s want %s", string(e.Value), string(expectVal))
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txDel(t *testing.T, db *DB, bucket string, key []byte, expectErr error) {
+	err := db.Update(func(tx *Tx) error {
+		err := tx.Delete(bucket, key)
+		assertErr(t, err, expectErr)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txDeleteBucket(t *testing.T, db *DB, ds uint16, bucket string, expectErr error) {
+	err := db.Update(func(tx *Tx) error {
+		err := tx.DeleteBucket(ds, bucket)
+		assertErr(t, err, expectErr)
+		return nil
+	})
+	require.NoError(t, err)
+}
 
 func InitOpt(fileDir string, isRemoveFiles bool) {
 	if fileDir == "" {
@@ -50,1052 +128,1183 @@ func InitOpt(fileDir string, isRemoveFiles bool) {
 	opt = DefaultOptions
 	opt.Dir = fileDir
 	opt.SegmentSize = 8 * 1024
+	opt.CleanFdsCacheThreshold = 0.5
+	opt.MaxFdNumsInCache = 1024
 }
 
 func TestDB_Basic(t *testing.T) {
-	InitOpt("", true)
-	db, err = Open(opt)
-	defer db.Close()
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		bucket := "bucket"
+		key0 := GetTestBytes(0)
+		val0 := GetRandomBytes(24)
 
-	if err != nil {
-		t.Fatal(err)
-	}
+		// put
+		txPut(t, db, bucket, key0, val0, Persistent, nil, nil)
+		txGet(t, db, bucket, key0, val0, nil)
 
-	bucket := "bucket1"
-	key := []byte("key1")
-	val := []byte("val1")
+		val1 := GetRandomBytes(24)
 
-	//put
-	if err := db.Update(
-		func(tx *Tx) error {
-			return tx.Put(bucket, key, val, Persistent)
-		}); err != nil {
-		t.Fatal(err)
-	}
+		// update
+		txPut(t, db, bucket, key0, val1, Persistent, nil, nil)
+		txGet(t, db, bucket, key0, val1, nil)
 
-	//get
-	if err := db.View(
-		func(tx *Tx) error {
-			e, err := tx.Get(bucket, key)
-			if err == nil {
-				if string(e.Value) != string(val) {
-					t.Errorf("err Tx Get. got %s want %s", string(e.Value), string(val))
-				}
-			}
-			return nil
-		}); err != nil {
-		t.Fatal(err)
-	}
-
-	// delete
-	if err := db.Update(
-		func(tx *Tx) error {
-			err := tx.Delete(bucket, key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return nil
-		}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.View(
-		func(tx *Tx) error {
-			_, err := tx.Get(bucket, key)
-			if err == nil {
-				t.Errorf("err Tx Get.")
-			}
-			return nil
-		}); err != nil {
-		t.Fatal(err)
-	}
-
-	//update
-	val = []byte("val001")
-	if err := db.Update(
-		func(tx *Tx) error {
-			return tx.Put(bucket, key, val, Persistent)
-		}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.View(
-		func(tx *Tx) error {
-			e, err := tx.Get(bucket, key)
-			if err == nil {
-				if string(e.Value) != string(val) {
-					t.Errorf("err Tx Get. got %s want %s", string(e.Value), string(val))
-				}
-			}
-			return nil
-		}); err != nil {
-		t.Fatal(err)
-	}
+		// del
+		txDel(t, db, bucket, key0, nil)
+		txGet(t, db, bucket, key0, val1, ErrKeyNotFound)
+	})
 }
 
-func TestDB_Merge_For_string(t *testing.T) {
-	fileDir := "/tmp/nutsdb_test_str_for_merge"
+func TestDB_Flock(t *testing.T) {
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		db2, err := Open(db.opt)
+		require.Nil(t, db2)
+		require.Equal(t, ErrDirLocked, err)
 
-	files, _ := ioutil.ReadDir(fileDir)
-	for _, f := range files {
-		name := f.Name()
-		if name != "" {
-			err := os.RemoveAll(fileDir + "/" + name)
-			if err != nil {
-				panic(err)
+		err = db.Close()
+		require.NoError(t, err)
+
+		db2, err = Open(db.opt)
+		require.NoError(t, err)
+		require.NotNil(t, db2)
+
+		err = db2.flock.Unlock()
+		require.NoError(t, err)
+		require.False(t, db2.flock.Locked())
+
+		err = db2.Close()
+		require.Error(t, err)
+		require.Equal(t, ErrDirUnlocked, err)
+	})
+}
+
+func TestDB_DeleteANonExistKey(t *testing.T) {
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		testBucket := "test_bucket"
+		txDel(t, db, testBucket, GetTestBytes(0), ErrNotFoundBucket)
+		txPut(t, db, testBucket, GetTestBytes(1), GetRandomBytes(24), Persistent, nil, nil)
+		txDel(t, db, testBucket, GetTestBytes(0), ErrKeyNotFound)
+	})
+}
+
+func TestDB_CheckListExpired(t *testing.T) {
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		testBucket := "test_bucket"
+		txPut(t, db, testBucket, GetTestBytes(0), GetTestBytes(1), Persistent, nil, nil)
+		txPut(t, db, testBucket, GetTestBytes(1), GetRandomBytes(24), 1, nil, nil)
+
+		time.Sleep(1100 * time.Millisecond)
+
+		db.checkListExpired()
+
+		// this entry still alive
+		txGet(t, db, testBucket, GetTestBytes(0), GetTestBytes(1), nil)
+		// this entry will be deleted
+		txGet(t, db, testBucket, GetTestBytes(1), nil, ErrKeyNotFound)
+	})
+}
+
+func txLRem(t *testing.T, db *DB, bucket string, key []byte, count int, value []byte, expectErr error) {
+	err := db.Update(func(tx *Tx) error {
+		err := tx.LRem(bucket, key, count, value)
+		assertErr(t, err, expectErr)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txLRemByIndex(t *testing.T, db *DB, bucket string, key []byte, expectErr error, indexes ...int) {
+	err := db.Update(func(tx *Tx) error {
+		err := tx.LRemByIndex(bucket, key, indexes...)
+		assertErr(t, err, expectErr)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txSAdd(t *testing.T, db *DB, bucket string, key, value []byte, expectErr error, finalExpectErr error) {
+	err := db.Update(func(tx *Tx) error {
+		err := tx.SAdd(bucket, key, value)
+		assertErr(t, err, expectErr)
+		return nil
+	})
+	assertErr(t, err, finalExpectErr)
+}
+
+func txSKeys(t *testing.T, db *DB, bucket, pattern string, f func(key string) bool, expectVal int, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		num := 0
+		err := tx.SKeys(bucket, pattern, func(key string) bool {
+			num += 1
+			return f(key)
+		})
+		if expectErr != nil {
+			assert.ErrorIs(t, expectErr, err)
+		} else {
+			assert.NoError(t, err)
+			assert.Equal(t, expectVal, num)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txSIsMember(t *testing.T, db *DB, bucket string, key, value []byte, expect bool) {
+	err := db.View(func(tx *Tx) error {
+		ok, _ := tx.SIsMember(bucket, key, value)
+		require.Equal(t, expect, ok)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txSAreMembers(t *testing.T, db *DB, bucket string, key []byte, expect bool, value ...[]byte) {
+	err := db.View(func(tx *Tx) error {
+		ok, _ := tx.SAreMembers(bucket, key, value...)
+		require.Equal(t, expect, ok)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txSHasKey(t *testing.T, db *DB, bucket string, key []byte, expect bool) {
+	err := db.View(func(tx *Tx) error {
+		ok, _ := tx.SHasKey(bucket, key)
+		require.Equal(t, expect, ok)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txSMembers(t *testing.T, db *DB, bucket string, key []byte, expectLength int, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		members, err := tx.SMembers(bucket, key)
+		if expectErr != nil {
+			assert.ErrorIs(t, expectErr, err)
+		} else {
+			assert.NoError(t, err)
+			assert.Equal(t, expectLength, len(members))
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txSCard(t *testing.T, db *DB, bucket string, key []byte, expectLength int, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		length, err := tx.SCard(bucket, key)
+		if expectErr != nil {
+			assert.ErrorIs(t, expectErr, err)
+		} else {
+			assert.NoError(t, err)
+			assert.Equal(t, expectLength, length)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txSDiffByOneBucket(t *testing.T, db *DB, bucket string, key1, key2 []byte, expectVal [][]byte, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		diff, err := tx.SDiffByOneBucket(bucket, key1, key2)
+		if expectErr != nil {
+			assert.ErrorIs(t, expectErr, err)
+		} else {
+			assert.NoError(t, err)
+			assert.ElementsMatch(t, expectVal, diff)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txSDiffByTwoBucket(t *testing.T, db *DB, bucket1 string, key1 []byte, bucket2 string, key2 []byte, expectVal [][]byte, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		diff, err := tx.SDiffByTwoBuckets(bucket1, key1, bucket2, key2)
+		if expectErr != nil {
+			assert.ErrorIs(t, err, expectErr)
+		} else {
+			assert.NoError(t, err)
+			assert.ElementsMatch(t, expectVal, diff)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txSPop(t *testing.T, db *DB, bucket string, key []byte, expectErr error) {
+	err := db.Update(func(tx *Tx) error {
+		_, err := tx.SPop(bucket, key)
+		assertErr(t, err, expectErr)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txSMoveByOneBucket(t *testing.T, db *DB, bucket1 string, key1, key2, val []byte, expectVal bool, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		ok, err := tx.SMoveByOneBucket(bucket1, key1, key2, val)
+		if expectErr != nil {
+			assert.ErrorIs(t, err, expectErr)
+		} else {
+			assert.NoError(t, err)
+			assert.Equal(t, expectVal, ok)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txSMoveByTwoBuckets(t *testing.T, db *DB, bucket1 string, key1 []byte, bucket2 string, key2 []byte, val []byte, expectVal bool, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		ok, err := tx.SMoveByTwoBuckets(bucket1, key1, bucket2, key2, val)
+		if expectErr != nil {
+			assert.ErrorIs(t, err, expectErr)
+		} else {
+			assert.NoError(t, err)
+			assert.Equal(t, expectVal, ok)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txSUnionByOneBucket(t *testing.T, db *DB, bucket1 string, key1, key2 []byte, expectVal [][]byte, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		union, err := tx.SUnionByOneBucket(bucket1, key1, key2)
+		if expectErr != nil {
+			assert.ErrorIs(t, err, expectErr)
+		} else {
+			assert.NoError(t, err)
+			assert.ElementsMatch(t, expectVal, union)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txSUnionByTwoBuckets(t *testing.T, db *DB, bucket1 string, key1 []byte, bucket2 string, key2 []byte, expectVal [][]byte, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		union, err := tx.SUnionByTwoBuckets(bucket1, key1, bucket2, key2)
+		if expectErr != nil {
+			assert.ErrorIs(t, err, expectErr)
+		} else {
+			assert.NoError(t, err)
+			assert.ElementsMatch(t, expectVal, union)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txSRem(t *testing.T, db *DB, bucket string, key, value []byte, expectErr error) {
+	err := db.Update(func(tx *Tx) error {
+		err := tx.SRem(bucket, key, value)
+		assertErr(t, err, expectErr)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txZAdd(t *testing.T, db *DB, bucket string, key, value []byte, score float64, expectErr error, finalExpectErr error) {
+	err := db.Update(func(tx *Tx) error {
+		err := tx.ZAdd(bucket, key, score, value)
+		assertErr(t, err, expectErr)
+		return nil
+	})
+	assertErr(t, err, finalExpectErr)
+}
+
+func txZRem(t *testing.T, db *DB, bucket string, key, value []byte, expectErr error) {
+	err := db.Update(func(tx *Tx) error {
+		err := tx.ZRem(bucket, key, value)
+		assertErr(t, err, expectErr)
+		return nil
+	})
+	assert.NoError(t, err)
+}
+
+func txZCard(t *testing.T, db *DB, bucket string, key []byte, expectLength int, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		length, err := tx.ZCard(bucket, key)
+		if expectErr != nil {
+			assert.Equal(t, expectErr, err)
+		} else {
+			assert.Equal(t, expectLength, length)
+		}
+		return nil
+	})
+	assert.NoError(t, err)
+}
+
+func txZScore(t *testing.T, db *DB, bucket string, key, value []byte, expectScore float64, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		score, err := tx.ZScore(bucket, key, value)
+		if err != nil {
+			assert.Equal(t, expectErr, err)
+		} else {
+			assert.Equal(t, expectScore, score)
+		}
+		return nil
+	})
+	assert.NoError(t, err)
+}
+
+func txZRank(t *testing.T, db *DB, bucket string, key, value []byte, isRev bool, expectRank int, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		var (
+			rank int
+			err  error
+		)
+		if isRev {
+			rank, err = tx.ZRevRank(bucket, key, value)
+		} else {
+			rank, err = tx.ZRank(bucket, key, value)
+		}
+		if expectErr != nil {
+			assert.Equal(t, expectErr, err)
+		} else {
+			assert.Equal(t, expectRank, rank)
+		}
+		return nil
+	})
+	assert.NoError(t, err)
+}
+
+func txZPop(t *testing.T, db *DB, bucket string, key []byte, isMax bool, expectVal []byte, expectScore float64, expectErr error) {
+	err := db.Update(func(tx *Tx) error {
+		var (
+			member *SortedSetMember
+			err    error
+		)
+		if isMax {
+			member, err = tx.ZPopMax(bucket, key)
+		} else {
+			member, err = tx.ZPopMin(bucket, key)
+		}
+
+		if expectErr != nil {
+			assert.Equal(t, expectErr, err)
+		} else {
+			assert.Equal(t, expectVal, member.Value)
+			assert.Equal(t, expectScore, member.Score)
+		}
+		return nil
+	})
+	assert.NoError(t, err)
+}
+
+func txPop(t *testing.T, db *DB, bucket string, key, expectVal []byte, expectErr error, isLeft bool) {
+	err := db.Update(func(tx *Tx) error {
+		var item []byte
+		var err error
+
+		if isLeft {
+			item, err = tx.LPop(bucket, key)
+		} else {
+			item, err = tx.RPop(bucket, key)
+		}
+
+		if expectErr != nil {
+			require.Equal(t, expectErr, err)
+		} else {
+			require.Equal(t, expectVal, item)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txPush(t *testing.T, db *DB, bucket string, key, val []byte, isLeft bool, expectErr error, finalExpectErr error) {
+	err := db.Update(func(tx *Tx) error {
+		var err error
+
+		if isLeft {
+			err = tx.LPush(bucket, key, val)
+		} else {
+			err = tx.RPush(bucket, key, val)
+		}
+
+		assertErr(t, err, expectErr)
+
+		return nil
+	})
+	assertErr(t, err, finalExpectErr)
+}
+
+func txPushRaw(t *testing.T, db *DB, bucket string, key, val []byte, isLeft bool, expectErr error, finalExpectErr error) {
+	err := db.Update(func(tx *Tx) error {
+		var err error
+
+		if isLeft {
+			err = tx.LPushRaw(bucket, key, val)
+		} else {
+			err = tx.RPushRaw(bucket, key, val)
+		}
+
+		assertErr(t, err, expectErr)
+
+		return nil
+	})
+	assertErr(t, err, finalExpectErr)
+}
+
+func txExpireList(t *testing.T, db *DB, bucket string, key []byte, ttl uint32, expectErr error) {
+	err := db.Update(func(tx *Tx) error {
+		err := tx.ExpireList(bucket, key, ttl)
+		assertErr(t, err, expectErr)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txGetListTTL(t *testing.T, db *DB, bucket string, key []byte, expectVal uint32, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		ttl, err := tx.GetListTTL(bucket, key)
+		assertErr(t, err, expectErr)
+		require.Equal(t, ttl, expectVal)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txLKeys(t *testing.T, db *DB, bucket, pattern string, expectLen int, expectErr error, keysOperation func(keys []string) bool) {
+	err := db.View(func(tx *Tx) error {
+		var keys []string
+		err := tx.LKeys(bucket, pattern, func(key string) bool {
+			keys = append(keys, key)
+			return keysOperation(keys)
+		})
+		assertErr(t, err, expectErr)
+		require.Equal(t, expectLen, len(keys))
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txLRange(t *testing.T, db *DB, bucket string, key []byte, start, end, expectLen int, expectVal [][]byte, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		list, err := tx.LRange(bucket, key, start, end)
+		assertErr(t, err, expectErr)
+
+		require.Equal(t, expectLen, len(list))
+
+		if len(expectVal) > 0 {
+			for i, val := range list {
+				assert.Equal(t, expectVal[i], val)
 			}
 		}
-	}
 
-	opt := DefaultOptions
-	opt.Dir = fileDir
-	opt.SegmentSize = 1 * 100
-
-	db2, err := Open(opt)
-
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	bucketForString := "test_merge"
-
-	key1 := []byte("key_" + fmt.Sprintf("%07d", 1))
-	value1 := []byte("value1value1value1value1value1")
-	if err := db2.Update(
-		func(tx *Tx) error {
-			return tx.Put(bucketForString, key1, value1, Persistent)
-		}); err != nil {
-		t.Error("initStringDataAndDel,err batch put", err)
-	}
-
-	key2 := []byte("key_" + fmt.Sprintf("%07d", 2))
-	value2 := []byte("value2value2value2value2value2")
-	if err := db2.Update(
-		func(tx *Tx) error {
-			return tx.Put(bucketForString, key2, value2, Persistent)
-		}); err != nil {
-		t.Error("initStringDataAndDel,err batch put", err)
-	}
-
-	if err := db2.Update(
-		func(tx *Tx) error {
-			return tx.Delete(bucketForString, key2)
-		}); err != nil {
-		t.Error(err)
-	}
-
-	if err := db2.View(
-		func(tx *Tx) error {
-			if _, err := tx.Get(bucketForString, key2); err == nil {
-				t.Error("err read data ", err)
-			}
-			return nil
-		}); err != nil {
-		t.Fatal(err)
-	}
-
-	//GetValidKeyCount
-	validKeyNum := db2.BPTreeIdx[bucketForString].ValidKeyCount
-	if validKeyNum != 1 {
-		t.Errorf("err GetValidKeyCount. got %d want %d", validKeyNum, 1)
-	}
-
-	if err = db2.Merge(); err != nil {
-		t.Error("err merge", err)
-	}
+		return nil
+	})
+	require.NoError(t, err)
 }
 
-func Test_MergeRepeated(t *testing.T) {
-	InitOpt("", true)
-	opt.SegmentSize = 120
-	db, err = Open(opt)
-	if err != nil {
-		t.Errorf("wanted nil, got %v", err)
-	}
-	for i := 0; i < 20; i++ {
-		err = db.Update(func(tx *Tx) error {
-			if err := tx.Put("bucket", []byte("hello"), []byte("world"), Persistent); err != nil {
-				return err
+func txLSize(t *testing.T, db *DB, bucket string, key []byte, expectVal int, expectErr error) {
+	err := db.View(func(tx *Tx) error {
+		size, err := tx.LSize(bucket, key)
+		assertErr(t, err, expectErr)
+
+		require.Equal(t, expectVal, size)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txLTrim(t *testing.T, db *DB, bucket string, key []byte, start int, end int, expectErr error) {
+	err := db.Update(func(tx *Tx) error {
+		err := tx.LTrim(bucket, key, start, end)
+		assertErr(t, err, expectErr)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func txIterateBuckets(t *testing.T, db *DB, ds uint16, pattern string, f func(key string) bool, expectErr error, containsKey ...string) {
+	err := db.View(func(tx *Tx) error {
+		var elements []string
+		err := tx.IterateBuckets(ds, pattern, func(key string) bool {
+			if f != nil && !f(key) {
+				return false
 			}
-			return nil
+			elements = append(elements, key)
+			return true
 		})
 		if err != nil {
-			t.Errorf("wanted nil, got %v", err)
-		}
-	}
-	if db.MaxFileID != 9 {
-		t.Errorf("wanted fileID: %d, got :%d", 9, db.MaxFileID)
-	}
-	err = db.View(func(tx *Tx) error {
-		e, err := tx.Get("bucket", []byte("hello"))
-		if err != nil {
-			return err
-		}
-		if reflect.DeepEqual(e.Value, []byte("value")) {
-			return fmt.Errorf("wanted value: %v, got :%v", []byte("value"), e.Value)
+			assert.Equal(t, expectErr, err)
+		} else {
+			assert.NoError(t, err)
+			for _, key := range containsKey {
+				assert.Contains(t, elements, key)
+			}
 		}
 		return nil
 	})
-	if err != nil {
-		t.Errorf("wanted nil, got %v", err)
-	}
-	err = db.Merge()
-	if err != nil {
-		t.Errorf("wanted nil, got %v", err)
-	}
-	if db.MaxFileID != 10 {
-		t.Errorf("wanted fileID: %d, got :%d", 10, db.MaxFileID)
-	}
-	err = db.View(func(tx *Tx) error {
-		e, err := tx.Get("bucket", []byte("hello"))
-		if err != nil {
-			return err
-		}
-		if reflect.DeepEqual(e.Value, []byte("value")) {
-			return fmt.Errorf("wanted value: %v, got :%v", []byte("value"), e.Value)
-		}
-		return nil
+	require.NoError(t, err)
+}
+
+func TestDB_GetKeyNotFound(t *testing.T) {
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		bucket := "bucket"
+		txGet(t, db, bucket, GetTestBytes(0), nil, ErrBucketNotFound)
+		txPut(t, db, bucket, GetTestBytes(1), GetRandomBytes(24), Persistent, nil, nil)
+		txGet(t, db, bucket, GetTestBytes(0), nil, ErrKeyNotFound)
 	})
-	if err != nil {
-		t.Errorf("wanted nil, got %v", err)
-	}
-	err = db.Close()
-	if err != nil {
-		t.Errorf("wanted nil, got %v", err)
-	}
-}
-
-func opSAddAndCheckForTestMerge(bucketForSet string, key []byte, t *testing.T) {
-	for i := 0; i < 100; i++ {
-		if err := db.Update(func(tx *Tx) error {
-			val := []byte("setVal" + fmt.Sprintf("%07d", i))
-			err := tx.SAdd(bucketForSet, key, val)
-			if err != nil {
-				return err
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	for i := 0; i < 100; i++ {
-		if err := db.View(func(tx *Tx) error {
-			val := []byte("setVal" + fmt.Sprintf("%07d", i))
-			ok, _ := tx.SIsMember(bucketForSet, key, val)
-			if !ok {
-				t.Error("err read set data ")
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func TestDB_Merge_for_Set(t *testing.T) {
-	InitOpt("/tmp/nutsdbtestformergeset", true)
-	//InitOpt("/tmp/nutsdbtestformergeset", false)
-	db, err = Open(opt)
-
-	readFlag := false
-	mergeFlag := true
-
-	defer db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	bucketForSet := "bucket_for_set_merge_test"
-	key := []byte("mySet_for_merge_test")
-
-	if !readFlag {
-		opSAddAndCheckForTestMerge(bucketForSet, key, t)
-	}
-
-	if !readFlag {
-		for i := 0; i < 50; i++ {
-			if err := db.Update(func(tx *Tx) error {
-				val := []byte("setVal" + fmt.Sprintf("%07d", i))
-				err := tx.SRem(bucketForSet, key, val)
-				if err != nil {
-					return err
-				}
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-
-	for i := 0; i < 50; i++ {
-		if err := db.View(func(tx *Tx) error {
-			val := []byte("setVal" + fmt.Sprintf("%07d", i))
-			ok, _ := tx.SIsMember(bucketForSet, key, val)
-			if ok {
-				t.Error("err read set data ")
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	for i := 50; i < 100; i++ {
-		if err := db.View(func(tx *Tx) error {
-			val := []byte("setVal" + fmt.Sprintf("%07d", i))
-			ok, _ := tx.SIsMember(bucketForSet, key, val)
-			if !ok {
-				t.Error("err read set data ")
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	//do merge
-	if mergeFlag {
-		if err = db.Merge(); err != nil {
-			t.Error("err merge", err)
-		}
-	}
-}
-
-func initZSetDataForTestMerge(bucketForZSet string, t *testing.T) {
-	for i := 0; i < 100; i++ {
-		if err := db.Update(func(tx *Tx) error {
-			key := []byte("zsetKey" + fmt.Sprintf("%07d", i))
-			val := []byte("zsetVal" + fmt.Sprintf("%07d", i))
-			score, _ := strconv2.IntToFloat64(i)
-			err := tx.ZAdd(bucketForZSet, key, score, val)
-			if err != nil {
-				return err
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	for i := 0; i < 100; i++ {
-		if err := db.View(func(tx *Tx) error {
-			key := []byte("zsetKey" + fmt.Sprintf("%07d", i))
-			_, err := tx.ZGetByKey(bucketForZSet, key)
-			if err != nil {
-				return err
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func remZSetDataForTestMerge(bucketForZSet string, t *testing.T) {
-	for i := 0; i < 50; i++ {
-		if err := db.Update(func(tx *Tx) error {
-			key := []byte("zsetKey" + fmt.Sprintf("%07d", i))
-			err := tx.ZRem(bucketForZSet, string(key))
-			if err != nil {
-				return err
-			}
-
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func checkRemZSetDataForTestMerge(bucketForZSet string, t *testing.T) {
-	for i := 0; i < 50; i++ {
-		if err := db.View(func(tx *Tx) error {
-			key := []byte("zsetKey" + fmt.Sprintf("%07d", i))
-			_, err := tx.ZGetByKey(bucketForZSet, key)
-			//fmt.Println("get n",n)
-			if err == nil {
-				t.Error("err read sorted set data ")
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for i := 50; i < 100; i++ {
-		if err := db.View(func(tx *Tx) error {
-			key := []byte("zsetKey" + fmt.Sprintf("%07d", i))
-			_, err := tx.ZGetByKey(bucketForZSet, key)
-			if err != nil {
-				t.Error(err)
-				return err
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func opZRemRangeByRankForTestMerge(readFlag bool, bucketForZSet string, t *testing.T) {
-	if !readFlag {
-		if err := db.Update(func(tx *Tx) error {
-			err := tx.ZRemRangeByRank(bucketForZSet, 1, 10)
-			if err != nil {
-				return err
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	for i := 60; i < 100; i++ {
-		if err := db.View(func(tx *Tx) error {
-			key := []byte("zsetKey" + fmt.Sprintf("%07d", i))
-			_, err := tx.ZGetByKey(bucketForZSet, key)
-			if err != nil {
-				t.Error(err)
-				return err
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func TestDB_Merge_For_ZSET(t *testing.T) {
-	InitOpt("/tmp/nutsdbtestformergezset", true)
-	//InitOpt("/tmp/nutsdbtestformergezset", false)
-
-	readFlag := false
-	mergeFlag := true
-
-	bucketForZSet := "bucket_for_zset_merge_test"
-
-	db, err = Open(opt)
-	defer db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !readFlag {
-		initZSetDataForTestMerge(bucketForZSet, t)
-	}
-
-	if !readFlag {
-		remZSetDataForTestMerge(bucketForZSet, t)
-	}
-
-	checkRemZSetDataForTestMerge(bucketForZSet, t)
-
-	opZRemRangeByRankForTestMerge(readFlag, bucketForZSet, t)
-
-	if !readFlag {
-		if err := db.Update(func(tx *Tx) error {
-			_, err := tx.ZPopMax(bucketForZSet)
-			if err != nil {
-				return err
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-
-		if err := db.Update(func(tx *Tx) error {
-			_, err := tx.ZPopMin(bucketForZSet)
-			if err != nil {
-				return err
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	if err := db.View(func(tx *Tx) error {
-		key := []byte("zsetKey" + fmt.Sprintf("%07d", 99))
-		_, err := tx.ZGetByKey(bucketForZSet, key)
-		if err == nil {
-			t.Error("err TestDB_Merge_For_ZSET")
-			return err
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.View(func(tx *Tx) error {
-		key := []byte("zsetKey" + fmt.Sprintf("%07d", 60))
-		_, err := tx.ZGetByKey(bucketForZSet, key)
-		if err == nil {
-			t.Error("err TestDB_Merge_For_ZSET")
-			return err
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if mergeFlag {
-		if err = db.Merge(); err != nil {
-			t.Error("err merge", err)
-		}
-	}
-}
-
-func opLPopAndRPopForTestMerge(bucketForList string, key []byte, t *testing.T) {
-	if err := db.Update(func(tx *Tx) error {
-		item, err := tx.LPop(bucketForList, key)
-		if err != nil {
-			return err
-		}
-		val := "listVal" + fmt.Sprintf("%07d", 0)
-		if string(item) != val {
-			t.Error("TestDB_Merge_For_List err")
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		item, err := tx.LPop(bucketForList, key)
-		if err != nil {
-			return err
-		}
-		val := "listVal" + fmt.Sprintf("%07d", 1)
-		if string(item) != val {
-			t.Error("TestDB_Merge_For_List err")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		item, err := tx.RPop(bucketForList, key)
-		if err != nil {
-			return err
-		}
-
-		val := "listVal" + fmt.Sprintf("%07d", 99)
-		if string(item) != val {
-			t.Error("TestDB_Merge_For_List err")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		item, err := tx.RPop(bucketForList, key)
-		if err != nil {
-			return err
-		}
-
-		val := "listVal" + fmt.Sprintf("%07d", 98)
-		if string(item) != val {
-			t.Error("TestDB_Merge_For_List err")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func opRPushAndCheckForTestMerge(bucketForList string, key []byte, t *testing.T) {
-	for i := 0; i < 100; i++ {
-		if err := db.Update(func(tx *Tx) error {
-			val := []byte("listVal" + fmt.Sprintf("%07d", i))
-			err := tx.RPush(bucketForList, key, val)
-			if err != nil {
-				return err
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	if err := db.View(func(tx *Tx) error {
-		list, err := tx.LRange(bucketForList, key, 0, 99)
-		if len(list) != 100 {
-			t.Error("TestDB_Merge_For_List err")
-		}
-
-		if err != nil {
-			t.Error(err)
-			return err
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestDB_Merge_For_List(t *testing.T) {
-	InitOpt("/tmp/nutsdbtestformergelist", true)
-
-	readFlag := false
-	mergeFlag := true
-
-	bucketForList := "bucket_for_list_merge_test"
-	key := []byte("key_for_list_merge_test")
-
-	db, err = Open(opt)
-	defer db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !readFlag {
-		opRPushAndCheckForTestMerge(bucketForList, key, t)
-	}
-
-	opLPopAndRPopForTestMerge(bucketForList, key, t)
-
-	if err := db.Update(func(tx *Tx) error {
-		removedNum, err := tx.LRem(bucketForList, key, 1, []byte("listVal"+fmt.Sprintf("%07d", 33)))
-		if removedNum != 1 {
-			t.Fatal("removedNum err")
-		}
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.View(func(tx *Tx) error {
-		list, err := tx.LRange(bucketForList, key, 0, 49)
-		if len(list) != 50 {
-			t.Error("TestDB_Merge_For_List err")
-		}
-
-		if err != nil {
-			t.Error(err)
-			return err
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if mergeFlag {
-		if err = db.Merge(); err != nil {
-			t.Error("err merge", err)
-		}
-	}
-}
-
-func TestTx_Get_NotFound(t *testing.T) {
-	InitOpt("", false)
-	db, err = Open(opt)
-	defer db.Close()
-
-	if err != nil {
-		t.Fatal(err)
-	}
-	bucket := "bucketfoo"
-	key := []byte("keyfoo")
-	//get
-	if err := db.View(
-		func(tx *Tx) error {
-			e, err := tx.Get(bucket, key)
-			if err == nil {
-				t.Error("err TestTx_Get_Err")
-			}
-			if e != nil {
-				t.Error("err TestTx_Get_Err")
-			}
-			return nil
-		}); err != nil {
-		t.Fatal(err)
-	}
-
-}
-
-func opStrDataForTestOpen(t *testing.T) {
-	strBucket := "myStringBucket"
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.Put(strBucket, []byte("key"), []byte("val"), Persistent)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func opRPushForTestOpen(listBucket string, t *testing.T) {
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.RPush(listBucket, []byte("myList"), []byte("val1"))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.RPush(listBucket, []byte("myList"), []byte("val2"))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.RPush(listBucket, []byte("myList"), []byte("val3"))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func opLPushAndLPopForTestOpen(listBucket string, t *testing.T) {
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.LPush(listBucket, []byte("key"), []byte("val"))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		item, err := tx.LPop(listBucket, []byte("key"))
-		if string(item) != "val" {
-			t.Error("TestOpen err")
-		}
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func opListDataForTestOpen(t *testing.T) {
-	listBucket := "myListBucket"
-
-	opLPushAndLPopForTestOpen(listBucket, t)
-
-	opRPushForTestOpen(listBucket, t)
-
-	if err := db.Update(func(tx *Tx) error {
-		_, err := tx.LRem(listBucket, []byte("myList"), 1, []byte("val1"))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.LTrim(listBucket, []byte("myList"), 0, 1)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.RPush(listBucket, []byte("myList"), []byte("val4"))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		item, err := tx.RPop(listBucket, []byte("myList"))
-		if string(item) != "val4" || err != nil {
-			t.Error("TestOpen err")
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.RPush(listBucket, []byte("myList"), []byte("val5"))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.LSet(listBucket, []byte("myList"), 0, []byte("newVal"))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func opZSetDataForTestOpen(t *testing.T) {
-	zSetBucket := "myZSetBucket"
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.ZAdd(zSetBucket, []byte("key1"), 1, []byte("val1"))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.ZAdd(zSetBucket, []byte("key2"), 2, []byte("val2"))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		n, err := tx.ZPopMax(zSetBucket)
-		if err != nil {
-			return err
-		}
-
-		if string(n.Value) != "val2" {
-			t.Error("TestOpen err")
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		n, err := tx.ZPopMin(zSetBucket)
-		if err != nil {
-			return err
-		}
-
-		if string(n.Value) != "val1" {
-			t.Error("TestOpen err")
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.ZAdd(zSetBucket, []byte("key3"), 3, []byte("val3"))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.ZRem(zSetBucket, "key3")
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func opSetDataForTestOpen(t *testing.T) {
-	setBucket := "mySetBucket"
-	key := []byte("myList")
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.SAdd(setBucket, key, []byte("val"))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		ok, err := tx.SIsMember(setBucket, key, []byte("val"))
-		if err != nil || !ok {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		item, err := tx.SPop(setBucket, key)
-		if err != nil || item != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.SAdd(setBucket, key, []byte("val1"))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.Update(func(tx *Tx) error {
-		err := tx.SRem(setBucket, key, []byte("val1"))
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestOpen(t *testing.T) {
-	InitOpt("/tmp/nutsdbtestfordbopen", true)
-
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	opStrDataForTestOpen(t)
-
-	opListDataForTestOpen(t)
-
-	opZSetDataForTestOpen(t)
-
-	opSetDataForTestOpen(t)
-
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestDB_Backup(t *testing.T) {
-	InitOpt("", false)
-	db, err = Open(opt)
-	dir := "/tmp/nutsdbtest_backup"
-	err = db.Backup(dir)
-	if err != nil {
-		t.Error("err TestDB_Backup")
-	}
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		backUpDir := "/tmp/nutsdb-backup"
+		require.NoError(t, db.Backup(backUpDir))
+	})
 }
 
 func TestDB_BackupTarGZ(t *testing.T) {
-	InitOpt("", false)
-	db, err = Open(opt)
-	path := "/tmp/nutsdbtest_backup.tar.gz"
-	f, _ := os.Create(path)
-	defer f.Close()
-	err = db.BackupTarGZ(f)
-	if err != nil {
-		t.Error("err TestDB_Backup")
-	}
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		backUpFile := "/tmp/nutsdb-backup/backup.tar.gz"
+		f, err := os.Create(backUpFile)
+		require.NoError(t, err)
+		require.NoError(t, db.BackupTarGZ(f))
+	})
 }
 
 func TestDB_Close(t *testing.T) {
-	InitOpt("", false)
-	db, err = Open(opt)
-
-	err = db.Close()
-	if err != nil {
-		t.Error("err TestDB_Close")
-	}
-
-	err = db.Close()
-	if err == nil {
-		t.Error("err TestDB_Close")
-	}
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		require.NoError(t, db.Close())
+		require.Equal(t, ErrDBClosed, db.Close())
+	})
 }
 
-func Test_getRecordFromKey(t *testing.T) {
-	InitOpt("", true)
-	opt.SegmentSize = 120
-	opt.EntryIdxMode = HintKeyAndRAMIdxMode
-	db, err = Open(opt)
-	if err != nil {
-		t.Errorf("wanted nil, got %v", err)
-	}
-	_, err = db.getRecordFromKey([]byte("bucket"), []byte("hello"))
-	if err != ErrBucketNotFound {
-		t.Errorf("wanted ErrBucketNotFound, got %v", err)
-	}
-	for i := 0; i < 10; i++ {
-		err = db.Update(func(tx *Tx) error {
-			if err := tx.Put("bucket", []byte("hello"), []byte("world"), Persistent); err != nil {
-				return err
+func TestDB_ErrThenReadWrite(t *testing.T) {
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		bucket := "testForDeadLock"
+		err = db.View(
+			func(tx *Tx) error {
+				return fmt.Errorf("err happened")
+			})
+		require.NotNil(t, err)
+
+		err = db.View(
+			func(tx *Tx) error {
+				key := []byte("key1")
+				_, err := tx.Get(bucket, key)
+				if err != nil {
+					return err
+				}
+
+				return nil
+			})
+		require.NotNil(t, err)
+
+		notice := make(chan struct{})
+		go func() {
+			err = db.Update(
+				func(tx *Tx) error {
+					notice <- struct{}{}
+
+					return nil
+				})
+			require.NoError(t, err)
+		}()
+
+		select {
+		case <-notice:
+		case <-time.After(1 * time.Second):
+			t.Fatalf("exist deadlock")
+		}
+	})
+}
+
+func TestDB_ErrorHandler(t *testing.T) {
+	opts := DefaultOptions
+	handleErrCalled := false
+	opts.ErrorHandler = ErrorHandlerFunc(func(err error) {
+		handleErrCalled = true
+	})
+
+	runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+		err = db.View(
+			func(tx *Tx) error {
+				return fmt.Errorf("err happened")
+			})
+		require.NotNil(t, err)
+		require.Equal(t, handleErrCalled, true)
+	})
+}
+
+func TestDB_CommitBuffer(t *testing.T) {
+	bucket := "bucket"
+
+	opts := DefaultOptions
+	opts.CommitBufferSize = 8 * MB
+	runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+		require.Equal(t, int64(8*MB), db.opt.CommitBufferSize)
+		// When the database starts, the commit buffer should be allocated with the size of CommitBufferSize.
+		require.Equal(t, 0, db.commitBuffer.Len())
+		require.Equal(t, db.opt.CommitBufferSize, int64(db.commitBuffer.Cap()))
+
+		txPut(t, db, bucket, GetTestBytes(0), GetRandomBytes(24), Persistent, nil, nil)
+
+		// When tx is committed, content of commit buffer should be empty, but do not release memory
+		require.Equal(t, 0, db.commitBuffer.Len())
+		require.Equal(t, db.opt.CommitBufferSize, int64(db.commitBuffer.Cap()))
+	})
+
+	opts = DefaultOptions
+	opts.CommitBufferSize = 1 * KB
+	runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+		require.Equal(t, int64(1*KB), db.opt.CommitBufferSize)
+
+		err := db.Update(func(tx *Tx) error {
+			// making this tx big enough, it should not use the commit buffer
+			for i := 0; i < 1000; i++ {
+				err := tx.Put(bucket, GetTestBytes(i), GetRandomBytes(1024), Persistent)
+				require.NoError(t, err)
 			}
 			return nil
 		})
-		if err != nil {
-			t.Errorf("wanted nil, got %v", err)
-		}
+		require.NoError(t, err)
+
+		require.Equal(t, 0, db.commitBuffer.Len())
+		require.Equal(t, db.opt.CommitBufferSize, int64(db.commitBuffer.Cap()))
+	})
+}
+
+func TestDB_DeleteBucket(t *testing.T) {
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		bucket := "bucket"
+		key := GetTestBytes(0)
+		val := GetTestBytes(0)
+
+		txDeleteBucket(t, db, DataStructureBTree, bucket, ErrBucketNotFound)
+
+		txPut(t, db, bucket, key, val, Persistent, nil, nil)
+		txGet(t, db, bucket, key, val, nil)
+
+		txDeleteBucket(t, db, DataStructureBTree, bucket, nil)
+		txGet(t, db, bucket, key, nil, ErrBucketNotFound)
+		txDeleteBucket(t, db, DataStructureBTree, bucket, ErrBucketNotFound)
+	})
+}
+
+func withDBOption(t *testing.T, opt Options, fn func(t *testing.T, db *DB)) {
+	db, err := Open(opt)
+	require.NoError(t, err)
+
+	defer func() {
+		os.RemoveAll(db.opt.Dir)
+		db.Close()
+	}()
+
+	fn(t, db)
+}
+
+func withDefaultDB(t *testing.T, fn func(t *testing.T, db *DB)) {
+	tmpdir, _ := os.MkdirTemp("", "nutsdb")
+	opt := DefaultOptions
+	opt.Dir = tmpdir
+	opt.SegmentSize = 8 * 1024
+
+	withDBOption(t, opt, fn)
+}
+
+func withRAMIdxDB(t *testing.T, fn func(t *testing.T, db *DB)) {
+	tmpdir, _ := os.MkdirTemp("", "nutsdb")
+	opt := DefaultOptions
+	opt.Dir = tmpdir
+	opt.EntryIdxMode = HintKeyAndRAMIdxMode
+
+	withDBOption(t, opt, fn)
+}
+
+func TestDB_HintKeyValAndRAMIdxMode_RestartDB(t *testing.T) {
+	opts := DefaultOptions
+	runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+		bucket := "bucket"
+		key := GetTestBytes(0)
+		val := GetTestBytes(0)
+
+		txPut(t, db, bucket, key, val, Persistent, nil, nil)
+		txGet(t, db, bucket, key, val, nil)
+
+		db.Close()
+		// restart db with HintKeyValAndRAMIdxMode EntryIdxMode
+		db, err := Open(db.opt)
+		require.NoError(t, err)
+		txGet(t, db, bucket, key, val, nil)
+	})
+}
+
+func TestDB_HintKeyAndRAMIdxMode_RestartDB(t *testing.T) {
+	opts := DefaultOptions
+	opts.EntryIdxMode = HintKeyAndRAMIdxMode
+	runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+		bucket := "bucket"
+		key := GetTestBytes(0)
+		val := GetTestBytes(0)
+
+		txPut(t, db, bucket, key, val, Persistent, nil, nil)
+		txGet(t, db, bucket, key, val, nil)
+		db.Close()
+
+		// restart db with HintKeyAndRAMIdxMode EntryIdxMode
+		db, err := Open(db.opt)
+		require.NoError(t, err)
+		txGet(t, db, bucket, key, val, nil)
+	})
+}
+
+func TestDB_ChangeMode_RestartDB(t *testing.T) {
+	changeModeRestart := func(firstMode EntryIdxMode, secondMode EntryIdxMode) {
+		opts := DefaultOptions
+		opts.EntryIdxMode = firstMode
+		var err error
+
+		runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+			bucket := "bucket"
+
+			// k-v
+			for i := 0; i < 10; i++ {
+				txPut(t, db, bucket, GetTestBytes(i), GetTestBytes(i), Persistent, nil, nil)
+			}
+
+			// list
+			for i := 0; i < 10; i++ {
+				txPush(t, db, bucket, GetTestBytes(0), GetTestBytes(i), true, nil, nil)
+			}
+
+			err = db.Update(func(tx *Tx) error {
+				return tx.LRem(bucket, GetTestBytes(0), 1, GetTestBytes(5))
+			})
+			require.NoError(t, err)
+
+			for i := 0; i < 2; i++ {
+				txPop(t, db, bucket, GetTestBytes(0), GetTestBytes(9-i), nil, true)
+			}
+
+			for i := 0; i < 2; i++ {
+				txPop(t, db, bucket, GetTestBytes(0), GetTestBytes(i), nil, false)
+			}
+
+			// set
+			for i := 0; i < 10; i++ {
+				txSAdd(t, db, bucket, GetTestBytes(0), GetTestBytes(i), nil, nil)
+			}
+
+			for i := 0; i < 3; i++ {
+				txSRem(t, db, bucket, GetTestBytes(0), GetTestBytes(i), nil)
+			}
+
+			// zset
+			for i := 0; i < 10; i++ {
+				txZAdd(t, db, bucket, GetTestBytes(0), GetTestBytes(i), float64(i), nil, nil)
+			}
+
+			for i := 0; i < 3; i++ {
+				txZRem(t, db, bucket, GetTestBytes(0), GetTestBytes(i), nil)
+			}
+
+			require.NoError(t, db.Close())
+
+			opts.EntryIdxMode = secondMode
+			db, err = Open(opts)
+			require.NoError(t, err)
+
+			// k-v
+			for i := 0; i < 10; i++ {
+				txGet(t, db, bucket, GetTestBytes(i), GetTestBytes(i), nil)
+			}
+
+			// list
+			txPop(t, db, bucket, GetTestBytes(0), GetTestBytes(7), nil, true)
+			txPop(t, db, bucket, GetTestBytes(0), GetTestBytes(6), nil, true)
+			txPop(t, db, bucket, GetTestBytes(0), GetTestBytes(4), nil, true)
+			txPop(t, db, bucket, GetTestBytes(0), GetTestBytes(2), nil, false)
+
+			err = db.View(func(tx *Tx) error {
+				size, err := tx.LSize(bucket, GetTestBytes(0))
+				require.NoError(t, err)
+				require.Equal(t, 1, size)
+				return nil
+			})
+			require.NoError(t, err)
+
+			// set
+			for i := 0; i < 3; i++ {
+				txSIsMember(t, db, bucket, GetTestBytes(0), GetTestBytes(i), false)
+			}
+
+			for i := 3; i < 10; i++ {
+				txSIsMember(t, db, bucket, GetTestBytes(0), GetTestBytes(i), true)
+			}
+
+			// zset
+			for i := 0; i < 3; i++ {
+				txZScore(t, db, bucket, GetTestBytes(0), GetTestBytes(i), float64(i), ErrSortedSetMemberNotExist)
+			}
+
+			for i := 3; i < 10; i++ {
+				txZScore(t, db, bucket, GetTestBytes(0), GetTestBytes(i), float64(i), nil)
+			}
+		})
 	}
-	r, err := db.getRecordFromKey([]byte("bucket"), []byte("hello"))
-	if err != nil {
-		t.Errorf("wanted nil, got %v", err)
+
+	// HintKeyValAndRAMIdxMode to HintKeyAndRAMIdxMode
+	changeModeRestart(HintKeyValAndRAMIdxMode, HintKeyAndRAMIdxMode)
+	// HintKeyAndRAMIdxMode to HintKeyValAndRAMIdxMode
+	changeModeRestart(HintKeyAndRAMIdxMode, HintKeyValAndRAMIdxMode)
+}
+
+func TestTx_SmallFile(t *testing.T) {
+	opts := DefaultOptions
+	opts.SegmentSize = 100
+	opts.EntryIdxMode = HintKeyAndRAMIdxMode
+	runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+		bucket := "bucket"
+		err := db.Update(func(tx *Tx) error {
+			for i := 0; i < 100; i++ {
+				err := tx.Put(bucket, GetTestBytes(i), GetTestBytes(i), Persistent)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		require.Nil(t, err)
+		require.NoError(t, db.Close())
+		db, _ = Open(opts)
+
+		txGet(t, db, bucket, GetTestBytes(10), GetTestBytes(10), nil)
+	})
+}
+
+func TestDB_DataStructureBTreeWriteRecordLimit(t *testing.T) {
+	opts := DefaultOptions
+	limitCount := int64(1000)
+	opts.MaxWriteRecordCount = limitCount
+	bucket1 := "bucket1"
+	bucket2 := "bucket2"
+	// Iterate over different EntryIdxModes
+	for _, idxMode := range []EntryIdxMode{HintKeyValAndRAMIdxMode, HintKeyAndRAMIdxMode} {
+		opts.EntryIdxMode = idxMode
+		runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+			// Add limitCount records
+			err := db.Update(func(tx *Tx) error {
+				for i := 0; i < int(limitCount); i++ {
+					key := []byte(strconv.Itoa(i))
+					value := []byte(strconv.Itoa(i))
+					err = tx.Put(bucket1, key, value, Persistent)
+					assertErr(t, err, nil)
+				}
+				return nil
+			})
+			require.NoError(t, err)
+			// Trigger the limit
+			txPut(t, db, bucket1, []byte("key1"), []byte("value1"), Persistent, nil, ErrTxnExceedWriteLimit)
+			// Add a key that is within the limit
+			txPut(t, db, bucket1, []byte("0"), []byte("000"), Persistent, nil, nil)
+			// Delete and add one item
+			txDel(t, db, bucket1, []byte("0"), nil)
+			txPut(t, db, bucket1, []byte("key1"), []byte("value1"), Persistent, nil, nil)
+			// Add an item to another bucket
+			txPut(t, db, bucket2, []byte("key2"), []byte("value2"), Persistent, nil, ErrTxnExceedWriteLimit)
+			// Delete bucket1
+			txDeleteBucket(t, db, DataStructureBTree, bucket1, nil)
+			// Add data to bucket2
+			err = db.Update(func(tx *Tx) error {
+				for i := 0; i < (int(limitCount) - 1); i++ {
+					key := []byte(strconv.Itoa(i))
+					value := []byte(strconv.Itoa(i))
+					err = tx.Put(bucket2, key, value, Persistent)
+					assertErr(t, err, nil)
+				}
+				return nil
+			})
+			require.NoError(t, err)
+			// Add items to bucket2
+			txPut(t, db, bucket2, []byte("key1"), []byte("value1"), Persistent, nil, nil)
+			txPut(t, db, bucket2, []byte("key2"), []byte("value2"), Persistent, nil, ErrTxnExceedWriteLimit)
+		})
 	}
-	if r.H.DataPos != 58 || r.H.FileID != 4 {
-		t.Errorf("wanted fileID: %d, got: %d\nwanted dataPos: %d, got: %d", 4, r.H.FileID, 58, r.H.DataPos)
+}
+
+func TestDB_DataStructureListWriteRecordLimit(t *testing.T) {
+	// Set options
+	opts := DefaultOptions
+	limitCount := int64(1000)
+	opts.MaxWriteRecordCount = limitCount
+	// Define bucket names
+	bucket1 := "bucket1"
+	bucket2 := "bucket2"
+	// Iterate over EntryIdxMode options
+	for _, idxMode := range []EntryIdxMode{HintKeyValAndRAMIdxMode, HintKeyAndRAMIdxMode} {
+		opts.EntryIdxMode = idxMode
+		runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+			// Add limitCount records
+			err := db.Update(func(tx *Tx) error {
+				for i := 0; i < int(limitCount); i++ {
+					key := []byte("0")
+					value := []byte(strconv.Itoa(i))
+					err = tx.LPush(bucket1, key, value)
+					assertErr(t, err, nil)
+				}
+				return nil
+			})
+			require.NoError(t, err)
+			// Trigger the limit
+			txPush(t, db, bucket1, []byte("0"), []byte("value1"), false, nil, ErrTxnExceedWriteLimit)
+			// Test LRem
+			err = db.Update(func(tx *Tx) error {
+				err := tx.LRem(bucket1, []byte("0"), 1, []byte("0"))
+				assertErr(t, err, nil)
+				return nil
+			})
+			require.NoError(t, err)
+			txPush(t, db, bucket1, []byte("0"), []byte("value1"), true, nil, nil)
+			txPush(t, db, bucket1, []byte("0"), []byte("value1"), false, nil, ErrTxnExceedWriteLimit)
+			// Test for DataLPopFlag
+			err = db.Update(func(tx *Tx) error {
+				_, err := tx.LPop(bucket1, []byte("0"))
+				assertErr(t, err, nil)
+				return nil
+			})
+			require.NoError(t, err)
+			txPush(t, db, bucket1, []byte("0"), []byte("value1"), false, nil, nil)
+			txPush(t, db, bucket1, []byte("0"), []byte("value1"), false, nil, ErrTxnExceedWriteLimit)
+			// Test for DataLTrimFlag
+			err = db.Update(func(tx *Tx) error {
+				err := tx.LTrim(bucket1, []byte("0"), 0, 0)
+				assertErr(t, err, nil)
+				return nil
+			})
+			require.NoError(t, err)
+			err = db.Update(func(tx *Tx) error {
+				for i := 0; i < int(limitCount)-2; i++ {
+					key := []byte("0")
+					value := []byte(strconv.Itoa(i))
+					err = tx.RPush(bucket1, key, value)
+					assertErr(t, err, nil)
+				}
+				return nil
+			})
+			require.NoError(t, err)
+			txPush(t, db, bucket1, []byte("0"), []byte("value11"), false, nil, nil)
+			txPush(t, db, bucket1, []byte("0"), []byte("value11"), false, nil, ErrTxnExceedWriteLimit)
+			// Test for LRemByIndex
+			err = db.Update(func(tx *Tx) error {
+				err := tx.LRemByIndex(bucket1, []byte("0"), 0, 1, 2)
+				assertErr(t, err, nil)
+				return nil
+			})
+			require.NoError(t, err)
+			err = db.Update(func(tx *Tx) error {
+				for i := 0; i < 2; i++ {
+					key := []byte("0")
+					value := []byte(strconv.Itoa(i))
+					err = tx.RPush(bucket1, key, value)
+					assertErr(t, err, nil)
+				}
+				return nil
+			})
+			require.NoError(t, err)
+			txPush(t, db, bucket2, []byte("0"), []byte("value11"), false, nil, nil)
+			txPush(t, db, bucket1, []byte("0"), []byte("value11"), false, nil, ErrTxnExceedWriteLimit)
+			// Delete bucket
+			txDeleteBucket(t, db, DataStructureList, bucket1, nil)
+			// Add data to another bucket
+			err = db.Update(func(tx *Tx) error {
+				for i := 0; i < int(limitCount)-1; i++ {
+					key := []byte(strconv.Itoa(i))
+					value := []byte(strconv.Itoa(i))
+					err = tx.RPush(bucket2, key, value)
+					assertErr(t, err, nil)
+				}
+				return nil
+			})
+			require.NoError(t, err)
+			txPush(t, db, bucket2, []byte("key1"), []byte("value1"), false, nil, ErrTxnExceedWriteLimit)
+		})
 	}
-	err = db.Close()
-	if err != nil {
-		t.Errorf("wanted nil, got %v", err)
+}
+
+func TestDB_DataStructureSetWriteRecordLimit(t *testing.T) {
+	// Set default options and limitCount.
+	opts := DefaultOptions
+	limitCount := int64(1000)
+	opts.MaxWriteRecordCount = limitCount
+	// Define bucket names.
+	bucket1 := "bucket1"
+	bucket2 := "bucket2"
+	// Loop through EntryIdxModes.
+	for _, idxMode := range []EntryIdxMode{HintKeyValAndRAMIdxMode, HintKeyAndRAMIdxMode} {
+		opts.EntryIdxMode = idxMode
+		runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+			// Add limitCount records to bucket1.
+			err := db.Update(func(tx *Tx) error {
+				for i := 0; i < int(limitCount); i++ {
+					key := []byte("0")
+					value := []byte(strconv.Itoa(i))
+					err := tx.SAdd(bucket1, key, value)
+					assertErr(t, err, nil)
+				}
+				return nil
+			})
+			require.NoError(t, err)
+			// Try to add one more item to bucket1 and check for ErrTxnExceedWriteLimit.
+			txSAdd(t, db, bucket1, []byte("key1"), []byte("value1"), nil, ErrTxnExceedWriteLimit)
+			// Remove one item and add another item to bucket1.
+			txSRem(t, db, bucket1, []byte("0"), []byte("0"), nil)
+			txSAdd(t, db, bucket1, []byte("key1"), []byte("value1"), nil, nil)
+			// Add two more items to bucket1 and check for ErrTxnExceedWriteLimit.
+			txSAdd(t, db, bucket1, []byte("key1"), []byte("value1"), nil, nil)
+			txSAdd(t, db, bucket1, []byte("key11"), []byte("value11"), nil, ErrTxnExceedWriteLimit)
+			// Test for SPOP, SPOP two items from bucket1.
+			err = db.Update(func(tx *Tx) error {
+				_, err := tx.SPop(bucket1, []byte("0"))
+				assertErr(t, err, nil)
+				_, err = tx.SPop(bucket1, []byte("key1"))
+				assertErr(t, err, nil)
+				return nil
+			})
+			require.NoError(t, err)
+			// Add two items to bucket1 and check for ErrTxnExceedWriteLimit.
+			txSAdd(t, db, bucket1, []byte("1"), []byte("value1"), nil, nil)
+			txSAdd(t, db, bucket1, []byte("1"), []byte("value2"), nil, nil)
+			txSAdd(t, db, bucket1, []byte("1"), []byte("value3"), nil, ErrTxnExceedWriteLimit)
+			// Delete bucket1.
+			txDeleteBucket(t, db, DataStructureSet, bucket1, nil)
+			// Add data to bucket2.
+			txSAdd(t, db, bucket2, []byte("key1"), []byte("value1"), nil, nil)
+			err = db.Update(func(tx *Tx) error {
+				for i := 0; i < int(limitCount)-1; i++ {
+					value := []byte(strconv.Itoa(i))
+					err = tx.SAdd(bucket2, []byte("2"), value)
+					assertErr(t, err, nil)
+				}
+				return nil
+			})
+			require.NoError(t, err)
+			// Try to add one more item to bucket2 and check for ErrTxnExceedWriteLimit.
+			txSAdd(t, db, bucket2, []byte("key2"), []byte("value2"), nil, ErrTxnExceedWriteLimit)
+		})
+	}
+}
+
+func TestDB_DataStructureSortedSetWriteRecordLimit(t *testing.T) {
+	// Set up options
+	opts := DefaultOptions
+	limitCount := int64(1000)
+	opts.MaxWriteRecordCount = limitCount
+	// Set up bucket names and score
+	bucket1 := "bucket1"
+	bucket2 := "bucket2"
+	score := 1.0
+	// Iterate over EntryIdxMode options
+	for _, idxMode := range []EntryIdxMode{HintKeyValAndRAMIdxMode, HintKeyAndRAMIdxMode} {
+		opts.EntryIdxMode = idxMode
+		runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+			// Add limitCount records
+			err := db.Update(func(tx *Tx) error {
+				for i := 0; i < int(limitCount); i++ {
+					key := []byte("0")
+					value := []byte(strconv.Itoa(i))
+					err := tx.ZAdd(bucket1, key, score+float64(i), value)
+					assertErr(t, err, nil)
+				}
+				return nil
+			})
+			require.NoError(t, err)
+			// Trigger the limit
+			txZAdd(t, db, bucket1, []byte("key1"), []byte("value1"), score, nil, ErrTxnExceedWriteLimit)
+			// Delete and add one item
+			txZRem(t, db, bucket1, []byte("0"), []byte("0"), nil)
+			txZAdd(t, db, bucket1, []byte("key1"), []byte("value1"), score, nil, nil)
+			// Add some data is ok
+			txZAdd(t, db, bucket1, []byte("key1"), []byte("value1"), score, nil, nil)
+			// Trigger the limit
+			txZAdd(t, db, bucket1, []byte("key2"), []byte("value2"), score, nil, ErrTxnExceedWriteLimit)
+			// Test for ZRemRangeByRank
+			err = db.Update(func(tx *Tx) error {
+				err := tx.ZRemRangeByRank(bucket1, []byte("0"), 1, 3)
+				assert.NoError(t, err)
+				return nil
+			})
+			assert.NoError(t, err)
+			txZAdd(t, db, bucket1, []byte("0"), []byte("value1"), score, nil, nil)
+			txZAdd(t, db, bucket1, []byte("0"), []byte("value2"), score, nil, nil)
+			txZAdd(t, db, bucket1, []byte("0"), []byte("value3"), score+float64(1000), nil, nil)
+			// Trigger the limit
+			txZAdd(t, db, bucket1, []byte("0"), []byte("value4"), score, nil, ErrTxnExceedWriteLimit)
+			// Test for ZPop
+			txZPop(t, db, bucket1, []byte("0"), true, []byte("value3"), score+float64(1000), nil)
+			txZAdd(t, db, bucket1, []byte("key3"), []byte("value3"), score, nil, nil)
+			// Delete bucket
+			txDeleteBucket(t, db, DataStructureSortedSet, bucket1, nil)
+			// Add data to another bucket
+			txZAdd(t, db, bucket2, []byte("key1"), []byte("value1"), score, nil, nil)
+			// Add data to bucket1
+			err = db.Update(func(tx *Tx) error {
+				for i := 0; i < int(limitCount)-1; i++ {
+					key := []byte(strconv.Itoa(i))
+					value := []byte(strconv.Itoa(i))
+					err = tx.ZAdd(bucket1, key, score, value)
+					assertErr(t, err, nil)
+				}
+				return nil
+			})
+			require.NoError(t, err)
+			// Trigger the limit
+			txZAdd(t, db, bucket2, []byte("key1"), []byte("value2"), score, nil, ErrTxnExceedWriteLimit)
+		})
+	}
+}
+
+func TestDB_AllDsWriteRecordLimit(t *testing.T) {
+	// Set up options
+	opts := DefaultOptions
+	limitCount := int64(1000)
+	opts.MaxWriteRecordCount = limitCount
+	// Set up bucket names and score
+	bucket1 := "bucket1"
+	bucket2 := "bucket2"
+	score := 1.0
+	// Iterate over EntryIdxMode options
+	for _, idxMode := range []EntryIdxMode{HintKeyValAndRAMIdxMode, HintKeyAndRAMIdxMode} {
+		opts.EntryIdxMode = idxMode
+		runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+			// Add limitCount records
+			err := db.Update(func(tx *Tx) error {
+				for i := 0; i < int(limitCount); i++ {
+					key := []byte(strconv.Itoa(i))
+					value := []byte(strconv.Itoa(i))
+					err = tx.Put(bucket1, key, value, Persistent)
+					assertErr(t, err, nil)
+				}
+				return nil
+			})
+			require.NoError(t, err)
+			// Trigger the limit
+			txPush(t, db, bucket1, []byte("0"), []byte("value1"), false, nil, ErrTxnExceedWriteLimit)
+			// Delete item and add one
+			txDel(t, db, bucket1, []byte("0"), nil)
+			txPush(t, db, bucket1, []byte("0"), []byte("value1"), false, nil, nil)
+			// Trigger the limit
+			txSAdd(t, db, bucket1, []byte("key1"), []byte("value1"), nil, ErrTxnExceedWriteLimit)
+			// Delete item and add one
+			txDel(t, db, bucket1, []byte("1"), nil)
+			txSAdd(t, db, bucket1, []byte("key1"), []byte("value1"), nil, nil)
+			// Trigger the limit
+			txZAdd(t, db, bucket1, []byte("key1"), []byte("value1"), score, nil, ErrTxnExceedWriteLimit)
+			// Delete item and add one
+			txDel(t, db, bucket1, []byte("2"), nil)
+			txZAdd(t, db, bucket1, []byte("key1"), []byte("value1"), score, nil, nil)
+			// Delete bucket
+			txDeleteBucket(t, db, DataStructureSortedSet, bucket1, nil)
+			// Add data to another bucket
+			txPush(t, db, bucket2, []byte("key1"), []byte("value1"), false, nil, nil)
+			// Trigger the limit
+			txPush(t, db, bucket2, []byte("key2"), []byte("value2"), false, nil, ErrTxnExceedWriteLimit)
+		})
 	}
 }

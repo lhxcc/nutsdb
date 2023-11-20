@@ -17,22 +17,45 @@ package nutsdb
 import (
 	"testing"
 
-	"github.com/xujiajun/utils/strconv2"
+	"github.com/stretchr/testify/assert"
 )
 
-func TestPrintSortedMap(t *testing.T) {
-	entries := make(map[string]*Entry, 10)
-	for i := 0; i < 10; i++ {
-		k := strconv2.IntToStr(i)
-		entries[k] = &Entry{Key: []byte(k)}
-	}
+func TestMarshalInts(t *testing.T) {
+	assertions := assert.New(t)
+	data, err := MarshalInts([]int{})
+	assertions.NoError(err, "TestMarshalInts")
 
-	keys, _ := SortedEntryKeys(entries)
+	ints, err := UnmarshalInts(data)
+	assertions.NoError(err, "TestMarshalInts")
+	assertions.Equal(0, len(ints), "TestMarshalInts")
 
-	for i := 0; i < 10; i++ {
-		k := strconv2.IntToStr(i)
-		if k != keys[i] {
-			t.Errorf("err TestPrintSortedMap. got %s want %s", keys[i], k)
-		}
-	}
+	data, err = MarshalInts([]int{1, 3})
+	assertions.NoError(err, "TestMarshalInts")
+
+	ints, err = UnmarshalInts(data)
+	assertions.NoError(err, "TestMarshalInts")
+	assertions.Equal(2, len(ints), "TestMarshalInts")
+	assertions.Equal(1, ints[0], "TestMarshalInts")
+	assertions.Equal(3, ints[1], "TestMarshalInts")
+}
+
+func TestMatchForRange(t *testing.T) {
+	assertions := assert.New(t)
+
+	end, err := MatchForRange("*", "hello", func(key string) bool {
+		return true
+	})
+	assertions.NoError(err, "TestMatchForRange")
+	assertions.False(end, "TestMatchForRange")
+
+	_, err = MatchForRange("[", "hello", func(key string) bool {
+		return true
+	})
+	assertions.Error(err, "TestMatchForRange")
+
+	end, err = MatchForRange("*", "hello", func(key string) bool {
+		return false
+	})
+	assertions.NoError(err, "TestMatchForRange")
+	assertions.True(end, "TestMatchForRange")
 }

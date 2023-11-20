@@ -15,652 +15,429 @@
 package nutsdb
 
 import (
-	"io/ioutil"
-	"os"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
-func InitForList() {
-	fileDir := "/tmp/nutsdbtestlisttx"
-	files, _ := ioutil.ReadDir(fileDir)
-	for _, f := range files {
-		name := f.Name()
-		if name != "" {
-			err := os.RemoveAll(fileDir + "/" + name)
-			if err != nil {
-				panic(err)
-			}
-		}
+func pushDataByStartEnd(t *testing.T, db *DB, bucket string, key int, start, end int, isLeft bool) {
+	for i := start; i <= end; i++ {
+		txPush(t, db, bucket, GetTestBytes(key), GetTestBytes(i), isLeft, nil, nil)
 	}
+}
 
-	opt = DefaultOptions
-	opt.Dir = fileDir
-	opt.SegmentSize = 8 * 1024
-	return
+func pushDataByValues(t *testing.T, db *DB, bucket string, key int, isLeft bool, values ...int) {
+	for _, v := range values {
+		txPush(t, db, bucket, GetTestBytes(key), GetTestBytes(v), isLeft, nil, nil)
+	}
 }
 
 func TestTx_RPush(t *testing.T) {
-	InitForList()
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	bucket := "bucket"
 
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// 1. Insert values for some keys by using RPush
+	// 2. Validate values for these keys by using RPop
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByStartEnd(t, db, bucket, 0, 0, 9, false)
+		pushDataByStartEnd(t, db, bucket, 1, 10, 19, false)
+		pushDataByStartEnd(t, db, bucket, 2, 20, 29, false)
 
-	bucket := "myBucket"
-	key := []byte("myList")
-
-	if err := tx.RPush(bucket, []byte("myList"+SeparatorForListKey), []byte("a"), []byte("b"), []byte("c"), []byte("d")); err == nil {
-		tx.Rollback()
-		t.Fatal("TestTx_RPush err")
-	}
-
-	if err := tx.RPush(bucket, key, []byte("a"), []byte("b"), []byte("c"), []byte("d")); err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	}
-
-	if err := tx.RPush(bucket, []byte(""), []byte("a"), []byte("b"), []byte("c"), []byte("d")); err == nil {
-		tx.Rollback()
-		t.Fatal("TestTx_RPush err")
-	}
-
-	tx.Commit()
-
-	err = tx.RPush(bucket, key, []byte("e"))
-	if err == nil {
-		t.Error("TestTx_RPush err")
-	}
-
-	checkPushResult(bucket, key, t)
+		for i := 0; i < 10; i++ {
+			txPop(t, db, bucket, GetTestBytes(0), GetTestBytes(9-i), nil, false)
+		}
+		for i := 10; i < 20; i++ {
+			txPop(t, db, bucket, GetTestBytes(1), GetTestBytes(29-i), nil, false)
+		}
+		for i := 20; i < 30; i++ {
+			txPop(t, db, bucket, GetTestBytes(2), GetTestBytes(49-i), nil, false)
+		}
+	})
 }
 
 func TestTx_LPush(t *testing.T) {
-	InitForList()
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	bucket := "bucket"
 
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// 1. Insert values for some keys by using LPush
+	// 2. Validate values for these keys by using LPop
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByStartEnd(t, db, bucket, 0, 0, 9, true)
+		pushDataByStartEnd(t, db, bucket, 1, 10, 19, true)
+		pushDataByStartEnd(t, db, bucket, 2, 20, 29, true)
 
-	bucket := "myBucket"
-	key := []byte("myList")
-	if err := tx.LPush(bucket, []byte("myList"+SeparatorForListKey), []byte("d"), []byte("c"), []byte("b"), []byte("a")); err == nil {
-		t.Error("TestTx_LPush err")
-	}
+		txPush(t, db, bucket, []byte("012|sas"), GetTestBytes(0), true, ErrSeparatorForListKey, nil)
 
-	if err := tx.LPush(bucket, key, []byte("d"), []byte("c"), []byte("b"), []byte("a")); err != nil {
-		t.Fatal(err)
-	}
-
-	tx.Commit()
-
-	err = tx.LPush(bucket, key, []byte("e"))
-	if err == nil {
-		t.Error("TestTx_LPush err")
-	}
-
-	checkPushResult(bucket, key, t)
+		for i := 0; i < 10; i++ {
+			txPop(t, db, bucket, GetTestBytes(0), GetTestBytes(9-i), nil, true)
+		}
+		for i := 10; i < 20; i++ {
+			txPop(t, db, bucket, GetTestBytes(1), GetTestBytes(29-i), nil, true)
+		}
+		for i := 20; i < 30; i++ {
+			txPop(t, db, bucket, GetTestBytes(2), GetTestBytes(49-i), nil, true)
+		}
+	})
 }
 
-func checkPushResult(bucket string, key []byte, t *testing.T) {
-	expectResult := []string{"a", "b", "c", "d"}
-	for i := 0; i < len(expectResult); i++ {
-		tx, err = db.Begin(true)
-		if err != nil {
-			t.Fatal(err)
+func TestTx_LPushRaw(t *testing.T) {
+	bucket := "bucket"
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		seq := uint64(100000)
+		for i := 0; i <= 100; i++ {
+			key := encodeListKey([]byte("0"), seq)
+			seq--
+			txPushRaw(t, db, bucket, key, GetTestBytes(i), true, nil, nil)
 		}
 
-		item, err := tx.LPop(bucket, key)
-		if err != nil || string(item) != expectResult[i] {
-			tx.Rollback()
-			t.Error("TestTx_LPush err")
-		} else {
-			tx.Commit()
+		for i := 0; i <= 100; i++ {
+			v := GetTestBytes(100 - i)
+			txPop(t, db, bucket, []byte("0"), v, nil, true)
 		}
-	}
+	})
+}
+
+func TestTx_RPushRaw(t *testing.T) {
+	bucket := "bucket"
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		seq := uint64(100000)
+		for i := 0; i <= 100; i++ {
+			key := encodeListKey([]byte("0"), seq)
+			seq++
+			txPushRaw(t, db, bucket, key, GetTestBytes(i), false, nil, nil)
+		}
+
+		txPush(t, db, bucket, []byte("012|sas"), GetTestBytes(0), false, ErrSeparatorForListKey, nil)
+
+		for i := 0; i <= 100; i++ {
+			v := GetTestBytes(100 - i)
+			txPop(t, db, bucket, []byte("0"), v, nil, false)
+		}
+	})
 }
 
 func TestTx_LPop(t *testing.T) {
-	InitForList()
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	bucket := "bucket"
 
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Calling LPop on a non-existent list
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		txPop(t, db, bucket, GetTestBytes(0), nil, ErrListNotFound, true)
+	})
 
-	bucket := "myBucket"
-	key := []byte("myList")
-
-	_, err := tx.LPop(bucket, key)
-	if err == nil {
-		t.Error("TestTx_LPop err")
-	}
-	tx.Rollback()
-
-	InitDataForList(bucket, key, t)
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Error(err)
-	}
-	item, err := tx.LPop(bucket, key)
-	if err != nil || string(item) != "a" {
-		tx.Rollback()
-		t.Error("TestTx_LPop err")
-	} else {
-		tx.Commit()
-	}
-
-	tx, _ = db.Begin(true)
-	item, err = tx.LPop(bucket, key)
-	if err != nil || string(item) != "b" {
-		tx.Rollback()
-		t.Error("TestTx_LPop err")
-	} else {
-		tx.Commit()
-		item, err = tx.LPop(bucket, key)
-		if err == nil || item != nil {
-			t.Error("TestTx_LPop err")
+	// Insert some values for a key and validate them by using LPop
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByStartEnd(t, db, bucket, 0, 0, 2, true)
+		for i := 0; i < 3; i++ {
+			txPop(t, db, bucket, GetTestBytes(0), GetTestBytes(2-i), nil, true)
 		}
-	}
-
-	tx, _ = db.Begin(true)
-	item, err = tx.LPop(bucket, key)
-	if err != nil || string(item) != "c" {
-		tx.Rollback()
-		t.Error("TestTx_LPop err")
-	} else {
-		tx.Commit()
-	}
-
-	tx, _ = db.Begin(true)
-	item, err = tx.LPop(bucket, key)
-	if err == nil || item != nil {
-		tx.Rollback()
-		t.Fatal("TestTx_LPop err")
-	}
-
-	tx.Commit()
-}
-
-func TestTx_LRange(t *testing.T) {
-	InitForList()
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	bucket := "myBucket"
-	key := []byte("myList")
-	list, err := tx.LRange(bucket, key, 0, -1)
-	if err == nil || list != nil {
-		t.Error("TestTx_LRange err")
-	}
-
-	tx.Rollback()
-
-	InitDataForList(bucket, key, t)
-
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	list, err = tx.LRange(bucket, key, 0, -1)
-	expectResult := []string{"a", "b", "c"}
-	if err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	}
-
-	for i := 0; i < len(expectResult); i++ {
-		if string(list[i]) != expectResult[i] {
-			t.Error("TestTx_LRange err")
-		}
-	}
-
-	tx.Commit()
-
-	_, err = tx.LRange(bucket, key, 0, -1)
-	if err == nil {
-		t.Error("TestTx_LRange err")
-	}
-}
-
-func TestTx_LRem(t *testing.T) {
-	InitForList()
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	bucket := "myBucket"
-	key := []byte("myList")
-	_, err := tx.LRem(bucket, key, 1, []byte("val"))
-	if err == nil {
-		t.Fatal(err)
-	}
-	tx.Rollback()
-}
-
-func TestTx_LRem2(t *testing.T) {
-	InitForList()
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bucket := "myBucket"
-	key := []byte("myList")
-
-	InitDataForList(bucket, key, t)
-
-	{
-		tx, err = db.Begin(false)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if list, err := tx.LRange(bucket, key, 0, -1); err != nil {
-			tx.Rollback()
-			t.Fatal(err)
-		} else {
-			expectResult := []string{"a", "b", "c"}
-			for i := 0; i < len(expectResult); i++ {
-				if string(list[i]) != expectResult[i] {
-					t.Error("TestTx_LRem err")
-				}
-			}
-			tx.Commit()
-		}
-	}
-
-	{
-		tx, err = db.Begin(true)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err = tx.LRem(bucket, []byte("fake_key"), 1, []byte("fake_val")); err == nil {
-			t.Fatal("TestTx_LRem err")
-		} else {
-			tx.Rollback()
-		}
-	}
-
-	{
-		tx, err = db.Begin(true)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err = tx.LRem(bucket, key, 1, []byte("a")); err != nil {
-			tx.Rollback()
-			t.Fatal(err)
-		} else {
-			tx.Commit()
-		}
-
-		tx, err = db.Begin(false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if list, err := tx.LRange(bucket, key, 0, -1); err != nil {
-			tx.Rollback()
-			t.Fatal(err)
-		} else {
-			expectResult := []string{"b", "c"}
-			for i := 0; i < len(expectResult); i++ {
-				if string(list[i]) != expectResult[i] {
-					t.Error("TestTx_LRem err")
-				}
-			}
-			tx.Commit()
-		}
-	}
-}
-
-func TestTx_LRem3(t *testing.T) {
-	InitForList()
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bucket := "myBucket"
-	key := []byte("myList")
-
-	InitDataForList(bucket, []byte("myList2"), t)
-
-	{
-		tx, err = db.Begin(true)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		_, err := tx.LRem(bucket, key, 4, []byte("b"))
-		if err == nil {
-			t.Error("TestTx_LRem err")
-		}
-		tx.Rollback()
-	}
-
-	{
-		tx, err = db.Begin(true)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		_, err := tx.LRem(bucket, []byte("myList2"), 4, []byte("b"))
-		if err == nil {
-			t.Error("TestTx_LRem err")
-		}
-		tx.Rollback()
-	}
-
-	{
-		tx, err = db.Begin(true)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		num, err := tx.LRem(bucket, []byte("myList2"), 1, []byte("b"))
-		if err != nil || num != 1 {
-			t.Error("TestTx_LRem err")
-		}
-		tx.Rollback()
-	}
-
-	InitDataForList(bucket, []byte("myList3"), t)
-
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = tx.RPush(bucket, []byte("myList3"), []byte("b"))
-	if err != nil {
-		tx.Rollback()
-		t.Error(err)
-	} else {
-		tx.Commit()
-	}
-
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	num, err := tx.LRem(bucket, []byte("myList3"), 0, []byte("b"))
-	if err != nil || num != 2 {
-		t.Error("TestTx_LRem err")
-	}
-	tx.Rollback()
-}
-
-func InitDataForList(bucket string, key []byte, t *testing.T) {
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = tx.RPush(bucket, key, []byte("a"), []byte("b"), []byte("c"))
-	if err != nil {
-		tx.Rollback()
-		t.Error(err)
-	} else {
-		tx.Commit()
-	}
-}
-
-func TestTx_LSet(t *testing.T) {
-	InitForList()
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bucket := "myBucket"
-	key := []byte("myList")
-	err = tx.LSet("fake_bucket", key, 0, []byte("foo"))
-	if err == nil {
-		t.Error("TestTx_LSet err")
-	}
-	tx.Rollback()
-
-	InitDataForList(bucket, key, t)
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = tx.LSet(bucket, key, -1, []byte("a1"))
-	if err == nil {
-		t.Error("TestTx_LSet err")
-	}
-
-	err = tx.LSet(bucket, []byte("fake_key"), 0, []byte("a1"))
-	if err == nil {
-		t.Error("TestTx_LSet err")
-	}
-
-	err = tx.LSet(bucket, key, 0, []byte("a1"))
-	if err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	} else {
-		tx.Commit()
-		err = tx.LSet(bucket, key, 0, []byte("a1"))
-		if err == nil {
-			t.Error("TestTx_LSet err")
-		}
-	}
-
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	list, err := tx.LRange(bucket, key, 0, -1)
-
-	expectResult := []string{"a1", "b", "c"}
-	for i := 0; i < len(expectResult); i++ {
-		if string(list[i]) != expectResult[i] {
-			t.Error("TestTx_LSet err")
-		}
-	}
-
-	if err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	} else {
-		tx.Commit()
-	}
-
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = tx.LSet(bucket, key, 100, []byte("a1"))
-	tx.Rollback()
-	if err == nil {
-		t.Fatal("TestTx_LSet err")
-	}
-}
-
-func TestTx_LTrim(t *testing.T) {
-	InitForList()
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tx, err = db.Begin(true)
-
-	bucket := "myBucket"
-	key := []byte("myList")
-
-	err := tx.LTrim(bucket, key, 0, 1)
-	if err == nil {
-		t.Error("TestTx_LTrim err")
-	}
-	tx.Rollback()
-
-	InitDataForList(bucket, key, t)
-
-	tx, _ = db.Begin(true)
-
-	err = tx.LTrim(bucket, []byte("fake_key"), 0, 1)
-	if err == nil {
-		t.Error("TestTx_LTrim err")
-	}
-
-	err = tx.LTrim(bucket, key, 0, 1)
-	if err != nil {
-		tx.Rollback()
-		t.Error("TestTx_LTrim err")
-	}
-
-	tx.Commit()
-
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	list, err := tx.LRange(bucket, key, 0, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tx.Commit()
-
-	err = tx.LTrim(bucket, key, 0, 1)
-	if err == nil {
-		t.Error("TestTx_LTrim err")
-	}
-
-	expectResult := []string{"a", "b"}
-	for i := 0; i < len(expectResult); i++ {
-		if string(list[i]) != expectResult[i] {
-			t.Error("TestTx_LTrim err")
-		}
-	}
-
-	key = []byte("myList2")
-	InitDataForList(bucket, key, t)
-
-	tx, _ = db.Begin(true)
-
-	err = tx.LTrim(bucket, key, 0, -10)
-	if err == nil {
-		t.Error("TestTx_LTrim err")
-	}
-	tx.Rollback()
+	})
 }
 
 func TestTx_RPop(t *testing.T) {
-	InitForList()
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	bucket := "bucket"
 
-	tx, err = db.Begin(true)
+	// Calling RPop on a non-existent list
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		txPop(t, db, bucket, GetTestBytes(0), nil, ErrListNotFound, false)
+	})
 
-	bucket := "myBucket"
-	key := []byte("myList")
+	// Calling RPop on a list with added data
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByStartEnd(t, db, bucket, 0, 0, 2, false)
 
-	item, err := tx.RPop(bucket, key)
-	if err == nil || item != nil {
-		t.Error("TestTx_RPop err")
-	}
-	tx.Rollback()
+		txPop(t, db, "fake_bucket", GetTestBytes(0), nil, ErrListNotFound, false)
 
-	InitDataForList(bucket, key, t)
+		for i := 0; i < 3; i++ {
+			txPop(t, db, bucket, GetTestBytes(0), GetTestBytes(2-i), nil, false)
+		}
 
-	tx, _ = db.Begin(true)
+		txPop(t, db, bucket, GetTestBytes(0), nil, ErrEmptyList, false)
+	})
+}
 
-	item, err = tx.RPop(bucket, []byte("fake_key"))
-	if err == nil || item != nil {
-		t.Error("TestTx_RPop err")
-	}
+func TestTx_LRange(t *testing.T) {
+	bucket := "bucket"
 
-	item, err = tx.RPop(bucket, key)
-	if err != nil || string(item) != "c" {
-		t.Error(err)
-	}
+	// Calling LRange on a non-existent list
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		txLRange(t, db, bucket, GetTestBytes(0), 0, -1, 0, nil, ErrListNotFound)
+	})
 
-	tx.Commit()
+	// Calling LRange on a list with added data
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByStartEnd(t, db, bucket, 0, 0, 2, true)
 
-	item, err = tx.RPop(bucket, key)
-	if err == nil || item != nil {
-		t.Error("TestTx_RPop err")
-	}
+		txLRange(t, db, bucket, GetTestBytes(0), 0, -1, 3, [][]byte{
+			GetTestBytes(2), GetTestBytes(1), GetTestBytes(0),
+		}, nil)
+
+		for i := 0; i < 3; i++ {
+			txPop(t, db, bucket, GetTestBytes(0), GetTestBytes(2-i), nil, true)
+		}
+
+		txLRange(t, db, bucket, GetTestBytes(0), 0, -1, 0, nil, nil)
+	})
+}
+
+func TestTx_LRem(t *testing.T) {
+	bucket := "bucket"
+
+	// Calling LRem on a non-existent list
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		txLRem(t, db, bucket, GetTestBytes(0), 1, GetTestBytes(0), ErrListNotFound)
+	})
+
+	// A basic calling for LRem
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByStartEnd(t, db, bucket, 0, 0, 3, true)
+
+		txLRem(t, db, bucket, GetTestBytes(0), 1, GetTestBytes(0), nil)
+		txLRange(t, db, bucket, GetTestBytes(0), 0, -1, 3, [][]byte{
+			GetTestBytes(3), GetTestBytes(2), GetTestBytes(1),
+		}, nil)
+		txLRem(t, db, bucket, GetTestBytes(0), 4, GetTestBytes(0), ErrCount)
+		txLRem(t, db, bucket, GetTestBytes(0), 1, GetTestBytes(1), nil)
+	})
+
+	// Calling LRem with count > 0
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		count := 3
+
+		pushDataByValues(t, db, bucket, 1, true, 0, 1, 0, 1, 0, 1, 0, 1)
+
+		txLRange(t, db, bucket, GetTestBytes(1), 0, -1, 8, [][]byte{
+			GetTestBytes(1), GetTestBytes(0), GetTestBytes(1), GetTestBytes(0),
+			GetTestBytes(1), GetTestBytes(0), GetTestBytes(1), GetTestBytes(0),
+		}, nil)
+		txLRem(t, db, bucket, GetTestBytes(1), count, GetTestBytes(0), nil)
+		txLRange(t, db, bucket, GetTestBytes(1), 0, -1, 5, [][]byte{
+			GetTestBytes(1), GetTestBytes(1), GetTestBytes(1), GetTestBytes(1), GetTestBytes(0),
+		}, nil)
+	})
+
+	// Calling LRem with count == 0
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		count := 0
+
+		pushDataByValues(t, db, bucket, 1, true, 0, 1, 0, 1, 0, 1, 0, 1)
+
+		txLRange(t, db, bucket, GetTestBytes(1), 0, -1, 8, [][]byte{
+			GetTestBytes(1), GetTestBytes(0), GetTestBytes(1), GetTestBytes(0),
+			GetTestBytes(1), GetTestBytes(0), GetTestBytes(1), GetTestBytes(0),
+		}, nil)
+		txLRem(t, db, bucket, GetTestBytes(1), count, GetTestBytes(0), nil)
+		txLRange(t, db, bucket, GetTestBytes(1), 0, -1, 4, [][]byte{
+			GetTestBytes(1), GetTestBytes(1), GetTestBytes(1), GetTestBytes(1),
+		}, nil)
+	})
+
+	// Calling LRem with count < 0
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		count := -3
+
+		pushDataByValues(t, db, bucket, 1, true, 0, 1, 0, 1, 0, 1, 0, 1)
+
+		txLRange(t, db, bucket, GetTestBytes(1), 0, -1, 8, [][]byte{
+			GetTestBytes(1), GetTestBytes(0), GetTestBytes(1), GetTestBytes(0),
+			GetTestBytes(1), GetTestBytes(0), GetTestBytes(1), GetTestBytes(0),
+		}, nil)
+		txLRem(t, db, bucket, GetTestBytes(1), count, GetTestBytes(0), nil)
+		txLRange(t, db, bucket, GetTestBytes(1), 0, -1, 5, [][]byte{
+			GetTestBytes(1), GetTestBytes(0), GetTestBytes(1), GetTestBytes(1), GetTestBytes(1),
+		}, nil)
+	})
+}
+
+func TestTx_LTrim(t *testing.T) {
+	bucket := "bucket"
+
+	// Calling LTrim on a non-existent list
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		txLTrim(t, db, bucket, GetTestBytes(0), 0, 1, ErrListNotFound)
+	})
+
+	// Calling LTrim on a list with added data and use LRange to validate it
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByStartEnd(t, db, bucket, 0, 0, 2, true)
+		txLTrim(t, db, bucket, GetTestBytes(0), 0, 1, nil)
+
+		txLRange(t, db, bucket, GetTestBytes(0), 0, -1, 2, [][]byte{
+			GetTestBytes(2), GetTestBytes(1),
+		}, nil)
+	})
+
+	// Calling LTrim with incorrect start and end
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		for i := 0; i < 3; i++ {
+			txPush(t, db, bucket, GetTestBytes(2), GetTestBytes(i), true, nil, nil)
+		}
+		txLTrim(t, db, bucket, GetTestBytes(2), 0, -10, ErrStartOrEnd)
+	})
 }
 
 func TestTx_LSize(t *testing.T) {
-	InitForList()
-	db, err = Open(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	bucket := "bucket"
 
-	bucket := "myBucket"
-	key := []byte("myList")
+	// Calling LSize on a non-existent list
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		txLSize(t, db, bucket, GetTestBytes(0), 0, ErrListNotFound)
+	})
 
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Calling LSize after adding some values
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByStartEnd(t, db, bucket, 0, 0, 2, false)
+		txLSize(t, db, bucket, GetTestBytes(0), 3, nil)
+	})
+}
 
-	size, err := tx.LSize(bucket, key)
-	if err == nil || size != 0 {
-		t.Error("TestTx_LSize err")
-	}
-	tx.Rollback()
+func TestTx_LRemByIndex(t *testing.T) {
+	bucket := "bucket"
 
-	InitDataForList(bucket, key, t)
+	// Calling LRemByIndex on a non-existent list
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		txLRemByIndex(t, db, bucket, GetTestBytes(0), ErrListNotFound)
+	})
 
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Calling LRemByIndex with len(indexes) == 0
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByValues(t, db, bucket, 0, true, 0)
+		txLRemByIndex(t, db, bucket, GetTestBytes(0), nil)
+	})
 
-	size, err = tx.LSize(bucket, key)
-	if err != nil {
-		tx.Rollback()
-		t.Error(err)
-	} else {
-		if size != 3 {
-			t.Error("TestTx_LSize err")
-		}
-		tx.Commit()
+	// Calling LRemByIndex with a expired bucket name
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByValues(t, db, bucket, 0, true, 0)
+		txExpireList(t, db, bucket, GetTestBytes(0), 1, nil)
+		time.Sleep(3 * time.Second)
+		txLRemByIndex(t, db, bucket, GetTestBytes(0), ErrListNotFound)
+	})
 
-		size, err = tx.LSize(bucket, key)
-		if size != 0 || err == nil {
-			t.Error("TestTx_LSize err")
-		}
-	}
+	// Calling LRemByIndex on a list with added data and use LRange to validate it
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByStartEnd(t, db, bucket, 0, 0, 2, false)
+		txLRemByIndex(t, db, bucket, GetTestBytes(0), nil, 1, 0, 8, -8, 88, -88)
+		txLRange(t, db, bucket, GetTestBytes(0), 0, -1, 1, [][]byte{
+			GetTestBytes(2),
+		}, nil)
+	})
+}
+
+func TestTx_ExpireList(t *testing.T) {
+	bucket := "bucket"
+
+	// Verify that the list with expiration time expires normally
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByStartEnd(t, db, bucket, 0, 0, 3, false)
+		txLRange(t, db, bucket, GetTestBytes(0), 0, -1, 4, [][]byte{
+			GetTestBytes(0), GetTestBytes(1), GetTestBytes(2), GetTestBytes(3),
+		}, nil)
+
+		txExpireList(t, db, bucket, GetTestBytes(0), 1, nil)
+		time.Sleep(time.Second)
+		txLRange(t, db, bucket, GetTestBytes(0), 0, -1, 0, nil, ErrListNotFound)
+	})
+
+	// Verify that the list with persistent time
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByStartEnd(t, db, bucket, 0, 0, 3, false)
+		txExpireList(t, db, bucket, GetTestBytes(0), Persistent, nil)
+		time.Sleep(time.Second)
+		txLRange(t, db, bucket, GetTestBytes(0), 0, -1, 4, [][]byte{
+			GetTestBytes(0), GetTestBytes(1), GetTestBytes(2), GetTestBytes(3),
+		}, nil)
+	})
+}
+
+func TestTx_LKeys(t *testing.T) {
+	bucket := "bucket"
+
+	// Calling LKeys after adding some keys
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByValues(t, db, bucket, 10, false, 0)
+		pushDataByValues(t, db, bucket, 11, false, 1)
+		pushDataByValues(t, db, bucket, 12, false, 2)
+		pushDataByValues(t, db, bucket, 23, false, 3)
+
+		txLKeys(t, db, bucket, "*", 4, nil, func(keys []string) bool {
+			return true
+		})
+
+		txLKeys(t, db, bucket, "*", 2, nil, func(keys []string) bool {
+			return len(keys) != 2
+		})
+
+		txLKeys(t, db, bucket, "nutsdb-00000001*", 3, nil, func(keys []string) bool {
+			return true
+		})
+	})
+}
+
+func TestTx_GetListTTL(t *testing.T) {
+	bucket := "bucket"
+
+	// Verify TTL of list
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		pushDataByStartEnd(t, db, bucket, 0, 0, 3, false)
+
+		txGetListTTL(t, db, bucket, GetTestBytes(0), uint32(0), nil)
+		txExpireList(t, db, bucket, GetTestBytes(0), uint32(1), nil)
+		txGetListTTL(t, db, bucket, GetTestBytes(0), uint32(1), nil)
+
+		time.Sleep(3 * time.Second)
+		txGetListTTL(t, db, bucket, GetTestBytes(0), uint32(0), ErrListNotFound)
+	})
+}
+
+func TestTx_ListEntryIdxMode_HintKeyValAndRAMIdxMode(t *testing.T) {
+	bucket := "bucket"
+	key := GetTestBytes(0)
+
+	opts := DefaultOptions
+	opts.EntryIdxMode = HintKeyValAndRAMIdxMode
+
+	// HintKeyValAndRAMIdxMode
+	runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+		err := db.Update(func(tx *Tx) error {
+			err := tx.LPush(bucket, key, []byte("d"), []byte("c"), []byte("b"), []byte("a"))
+			require.NoError(t, err)
+
+			return nil
+		})
+		require.NoError(t, err)
+
+		listIdx := db.Index.list.getWithDefault(bucket)
+		item, ok := listIdx.Items[string(key)].PopMin()
+		r := item.r
+		require.True(t, ok)
+		require.NotNil(t, r.V)
+		require.Equal(t, []byte("a"), r.V)
+	})
+}
+
+func TestTx_ListEntryIdxMode_HintKeyAndRAMIdxMode(t *testing.T) {
+	bucket := "bucket"
+	key := GetTestBytes(0)
+
+	opts := &DefaultOptions
+	opts.EntryIdxMode = HintKeyAndRAMIdxMode
+
+	// HintKeyAndRAMIdxMode
+	runNutsDBTest(t, opts, func(t *testing.T, db *DB) {
+		err := db.Update(func(tx *Tx) error {
+			err := tx.LPush(bucket, key, []byte("d"), []byte("c"), []byte("b"), []byte("a"))
+			require.NoError(t, err)
+
+			return nil
+		})
+		require.NoError(t, err)
+
+		listIdx := db.Index.list.getWithDefault(bucket)
+		item, ok := listIdx.Items[string(key)].PopMin()
+		r := item.r
+		require.True(t, ok)
+		require.Nil(t, r.V)
+
+		val, err := db.getValueByRecord(r)
+		require.NoError(t, err)
+		require.Equal(t, []byte("a"), val)
+	})
 }

@@ -16,143 +16,207 @@ package nutsdb
 
 import (
 	"fmt"
-	"io/ioutil"
-	"os"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestTx_Rollback(t *testing.T) {
-	Init()
-	db, err = Open(opt)
-	defer db.Close()
 
-	tx, err := db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bucket := "bucket_rollback_test"
+	withDefaultDB(t, func(t *testing.T, db *DB) {
 
-	for i := 0; i < 10; i++ {
-		key := []byte("key_" + fmt.Sprintf("%03d", i))
-		val := []byte("val_" + fmt.Sprintf("%03d", i))
-		if i == 7 {
-			key = []byte("") // set error key to make tx rollback
+		tx, err := db.Begin(true)
+		assert.NoError(t, err)
+
+		bucket := "bucket_rollback_test"
+
+		for i := 0; i < 10; i++ {
+			key := []byte("key_" + fmt.Sprintf("%03d", i))
+			val := []byte("val_" + fmt.Sprintf("%03d", i))
+			if i == 7 {
+				key = []byte("") // set error key to make tx rollback
+			}
+			if err = tx.Put(bucket, key, val, Persistent); err != nil {
+				// tx rollback
+				tx.Rollback()
+
+				if i < 7 {
+					t.Fatal("err TestTx_Rollback")
+				}
+			}
 		}
-		if err = tx.Put(bucket, key, val, Persistent); err != nil {
-			//tx rollback
-			tx.Rollback()
-			if i < 7 {
+
+		// no one found
+		for i := 0; i <= 10; i++ {
+			tx, err = db.Begin(false)
+			assert.NoError(t, err)
+
+			key := []byte("key_" + fmt.Sprintf("%03d", i))
+			if _, err := tx.Get(bucket, key); err != nil {
+				// tx rollback
+				tx.Rollback()
+			} else {
 				t.Fatal("err TestTx_Rollback")
 			}
 		}
-	}
 
-	// no one found
-	for i := 0; i <= 10; i++ {
-		tx, err = db.Begin(false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		key := []byte("key_" + fmt.Sprintf("%03d", i))
-		if _, err := tx.Get(bucket, key); err != nil {
-			//tx rollback
-			tx.Rollback()
-		} else {
-			t.Fatal("err TestTx_Rollback")
-		}
-	}
+	})
 }
 
 func TestTx_Begin(t *testing.T) {
-	fileDir := "/tmp/nutsdbtesttx"
-	files, _ := ioutil.ReadDir(fileDir)
-	for _, f := range files {
-		name := f.Name()
-		if name != "" {
-			err := os.RemoveAll(fileDir + "/" + name)
-			if err != nil {
-				panic(err)
-			}
-		}
-	}
+	t.Run("Begin with default options, with only read", func(t *testing.T) {
+		withDefaultDB(t, func(t *testing.T, db *DB) {
+			tx, err := db.Begin(false)
+			assert.NoError(t, err)
 
-	opt = DefaultOptions
-	opt.Dir = fileDir
-	opt.SegmentSize = 8 * 1024
-	opt.NodeNum = -1
+			err = tx.Rollback()
+			assert.NoError(t, err)
 
-	db, err = Open(opt)
-	tx, err = db.Begin(false)
-	if err == nil {
-		t.Error("err when tx begin")
-	}
+			err = db.Close()
+			assert.NoError(t, err)
+		})
+	})
 
-	opt.NodeNum = 1
-	db, err = Open(opt)
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Error("err when tx begin")
-	}
+	t.Run("Begin with default options, with writable", func(t *testing.T) {
+		withDefaultDB(t, func(t *testing.T, db *DB) {
+			tx, err := db.Begin(true)
+			assert.NoError(t, err)
 
-	tx.Rollback()
+			tx.Rollback()
 
-	err = db.Close()
-	if err != nil {
-		t.Error("err when db close")
-	}
+			err = db.Close()
+			assert.NoError(t, err)
+		})
+	})
 
-	err = db.Close()
-	if err == nil {
-		t.Error("err when db close")
-	}
+	t.Run("Begin with error: error options", func(t *testing.T) {
+		opt := DefaultOptions
+		opt.Dir = "/tmp/nutsdbtesttx"
+		opt.NodeNum = -1
 
-	_, err = db.Begin(false)
-	if err == nil {
-		t.Error("err when db closed and tx begin")
-	}
+		withDBOption(t, opt, func(t *testing.T, db *DB) {
+			_, err := db.Begin(false)
+			assert.Error(t, err)
+		})
+	})
 
-	//error
-	Init()
-	opt.NodeNum = -1
-	db, err = Open(opt)
-	if err != nil {
-		fmt.Println("err", err)
-	}
-	tx, err = db.Begin(false)
-	if err == nil {
-		t.Error("err when tx begin")
-	}
+	t.Run("Begin with error: begin the closed db", func(t *testing.T) {
+		withDefaultDB(t, func(t *testing.T, db *DB) {
+			tx, err := db.Begin(true)
+			assert.NoError(t, err)
+
+			tx.Rollback() // for unlock mutex
+
+			err = db.Close()
+			assert.NoError(t, err)
+
+			_, err = db.Begin(false)
+			assert.Error(t, err)
+		})
+	})
 }
 
 func TestTx_Close(t *testing.T) {
-	Init()
-	db, err = Open(opt)
-	tx, err := db.Begin(false)
-	if err != nil {
-		t.Error("err when tx begin")
-	}
+	withDefaultDB(t, func(t *testing.T, db *DB) {
+		tx, err := db.Begin(false)
+		assert.NoError(t, err)
 
-	tx.Rollback()
-	bucket := "bucket_tx_close_test"
+		err = tx.Rollback()
+		assert.NoError(t, err)
 
-	_, err = tx.Get(bucket, []byte("foo"))
-	if err == nil {
-		t.Error("err TestTx_Close")
-	}
+		bucket := "bucket_tx_close_test"
 
-	_, err = tx.RangeScan(bucket, []byte("foo0"), []byte("foo1"))
-	if err == nil {
-		t.Error("err TestTx_Close")
-	}
+		_, err = tx.Get(bucket, []byte("foo"))
+		assert.Errorf(t, err, "err TestTx_Close")
 
-	_, _, err = tx.PrefixScan(bucket, []byte("foo"), 0, 1)
-	if err == nil {
-		t.Error("err TestTx_Close")
-	}
+		_, err = tx.RangeScan(bucket, []byte("foo0"), []byte("foo1"))
+		assert.Errorf(t, err, "err TestTx_Close")
 
-	_, _, err = tx.PrefixSearchScan(bucket, []byte("f"), "oo", 0, 1)
-	if err == nil {
-		t.Error("err TestTx_Close")
-	}
+		_, err = tx.PrefixScan(bucket, []byte("foo"), 0, 1)
+		assert.Errorf(t, err, "err TestTx_Close")
 
+		_, err = tx.PrefixSearchScan(bucket, []byte("f"), "oo", 0, 1)
+		assert.Errorf(t, err, "err TestTx_Close")
+	})
+}
+
+func TestTx_CommittedStatus(t *testing.T) {
+
+	withRAMIdxDB(t, func(t *testing.T, db *DB) {
+
+		bucket := "bucket_committed_status"
+
+		{ // setup data
+			tx, err := db.Begin(true)
+			assert.NoError(t, err)
+
+			err = tx.Put(bucket, []byte("key1"), []byte("value1"), 0)
+			assert.NoError(t, err)
+
+			err = tx.Put(bucket, []byte("key2"), []byte("value2"), 0)
+			assert.NoError(t, err)
+
+			err = tx.Commit()
+			assert.NoError(t, err)
+		}
+
+		{ // check data
+
+			tx, err := db.Begin(false)
+			assert.NoError(t, err)
+
+			entry1, err := tx.Get(bucket, []byte("key1"))
+			assert.NoError(t, err)
+			assert.Equalf(t, UnCommitted, entry1.Meta.Status, "not the last entry should be uncommitted")
+
+			entry2, err := tx.Get(bucket, []byte("key2"))
+			assert.NoError(t, err)
+			assert.Equalf(t, Committed, entry2.Meta.Status, "the last entry should be committed")
+
+			err = tx.Commit()
+			assert.NoError(t, err)
+		}
+	})
+}
+
+func TestTx_PutWithTimestamp(t *testing.T) {
+	withDefaultDB(t, func(t *testing.T, db *DB) {
+		bucket := "bucket_put_with_timestamp"
+
+		timestamps := []uint64{1547707905, 1547707910, uint64(time.Now().Unix())}
+
+		{ // put with timestamp
+			tx, err := db.Begin(true)
+			assert.NoError(t, err)
+			for i, timestamp := range timestamps {
+				key := []byte("key_" + fmt.Sprintf("%03d", i))
+				val := []byte("val_" + fmt.Sprintf("%03d", i))
+
+				err = tx.PutWithTimestamp(bucket, key, val, 0, timestamp)
+				assert.NoError(t, err)
+
+			}
+			err = tx.Commit()
+			assert.NoError(t, err)
+		}
+
+		{ // check timestamp
+			tx, err := db.Begin(false)
+			assert.NoError(t, err)
+
+			for i, timestamp := range timestamps {
+				key := []byte("key_" + fmt.Sprintf("%03d", i))
+
+				entry, err := tx.Get(bucket, key)
+				assert.NoError(t, err)
+
+				assert.Equalf(t, entry.Meta.Timestamp, timestamp, "entry has wrong timestamp")
+
+			}
+
+			err = tx.Commit()
+			assert.NoError(t, err)
+		}
+	})
 }

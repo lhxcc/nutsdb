@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/xujiajun/nutsdb"
+	"github.com/nutsdb/nutsdb"
 	"github.com/xujiajun/utils/strconv2"
 	"github.com/xujiajun/utils/time2"
 )
@@ -15,11 +15,12 @@ var (
 )
 
 func init() {
-	opt := nutsdb.DefaultOptions
-	//opt.RWMode = nutsdb.MMap
-	//opt.SyncEnable = false
-	opt.Dir = "/tmp/nutsdbexample/example_batch"
-	db, _ = nutsdb.Open(opt)
+	db, _ = nutsdb.Open(
+		nutsdb.DefaultOptions,
+		nutsdb.WithDir("/tmp/nutsdbexample/example_batch"),
+		// nutsdb.WithRWMode(nutsdb.MMap),
+		// nutsdb.WithSyncEnable(false),
+	)
 	bucket = "bucket1"
 }
 
@@ -42,8 +43,42 @@ func main() {
 			}); err != nil {
 			log.Fatal(err)
 		}
-
 	}
 
 	fmt.Println("batch put data cost: ", time2.End())
+
+	time2.Start()
+	wb, err := db.NewWriteBatch()
+	if err != nil {
+		fmt.Println("NewWriteBatch() fail, err=", err)
+	}
+	N := 10000
+	for i := 0; i < N; i++ {
+		key := []byte("namename" + strconv2.IntToStr(i))
+		val := []byte("valvalvavalvalvalvavalvalvalvavalvalvalvaval" + strconv2.IntToStr(i))
+		if err := wb.Put(bucket, key, val, 0); err != nil {
+			fmt.Println("batch write entry fail, err=", err)
+			log.Fatal(err)
+		}
+	}
+	if err := wb.Flush(); err != nil {
+		fmt.Println("batch write flush fail, err=", err)
+	}
+	fmt.Printf("Time taken via batch write: %v\n", time2.End())
+
+	time2.Start()
+	if err := wb.Reset(); err != nil {
+		fmt.Println("batch write Reset fail, err=", err)
+	}
+	for i := 0; i < N; i++ {
+		key := []byte("namename" + strconv2.IntToStr(i))
+		if err := wb.Delete(bucket, key); err != nil {
+			fmt.Println("batch delete entry fail, err=", err)
+			log.Fatal(err)
+		}
+	}
+	if err := wb.Flush(); err != nil {
+		fmt.Println("batch delete flush fail, err=", err)
+	}
+	fmt.Printf("Time taken via batch delete: %v\n", time2.End())
 }

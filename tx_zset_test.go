@@ -1,4 +1,4 @@
-// Copyright 2019 The nutsdb Author. All rights reserved.
+// Copyright 2023 The nutsdb Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,588 +15,366 @@
 package nutsdb
 
 import (
-	"fmt"
-	"io/ioutil"
-	"os"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"testing"
 )
 
 var tx *Tx
 
-func InitForZSet() {
-	fileDir := "/tmp/nutsdbtestzsettx"
-	files, _ := ioutil.ReadDir(fileDir)
-	for _, f := range files {
-		name := f.Name()
-		if name != "" {
-			err := os.RemoveAll(fileDir + "/" + name)
-			if err != nil {
-				panic(err)
-			}
-		}
-	}
-
-	opt = DefaultOptions
-	opt.Dir = fileDir
-	opt.SegmentSize = 8 * 1024
-	return
+func TestTx_ZCheck(t *testing.T) {
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		err := db.View(func(tx *Tx) error {
+			require.Equal(t, ErrBucket, tx.ZCheck("fake bucket"))
+			return nil
+		})
+		require.NoError(t, err)
+	})
 }
 
 func TestTx_ZAdd(t *testing.T) {
-	InitForZSet()
-	db, err = Open(opt)
-	tx, err := db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
 
-	bucket := "myZSet"
+	bucket := "bucket"
 
-	if err := tx.ZAdd(bucket, []byte("key1"), 100, []byte("val1")); err != nil {
-		t.Fatal(err)
-		tx.Rollback()
-	} else {
-		err := tx.ZAdd(bucket, []byte("key1"+SeparatorForZSetKey), 100, []byte("val1"))
-		if err == nil {
-			tx.Rollback()
-			t.Fatal("TestTx_ZAdd err")
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		for i := 0; i < 10; i++ {
+			txZAdd(t, db, bucket, GetTestBytes(0), GetTestBytes(i), float64(i), nil, nil)
 		}
 
-		tx.Commit()
-	}
-
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	num, err := tx.ZCard(bucket)
-	if num != 1 || err != nil {
-		t.Error("TestTx_ZAdd err")
-	}
-
-	tx.Commit()
-}
-
-func InitDataForZSet(t *testing.T) (bucket, key1, key2, key3 string) {
-	InitForZSet()
-	db, err = Open(opt)
-	tx, err := db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	bucket = "myZSet"
-	key1 = "key1"
-	key2 = "key2"
-	key3 = "key3"
-	if err := tx.ZAdd(bucket, []byte(key1), 79, []byte("val1")); err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	}
-	if err := tx.ZAdd(bucket, []byte(key2), 98, []byte("val2")); err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	}
-	if err := tx.ZAdd(bucket, []byte(key3), 99, []byte("val3")); err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	}
-
-	tx.Commit()
-
-	return
-}
-
-func TestTx_ZMembers(t *testing.T) {
-	bucket, key1, key2, key3 := InitDataForZSet(t)
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if nodes, err := tx.ZMembers(bucket); err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	} else {
-		tx.Commit()
-		if len(nodes) != 3 {
-			t.Error("TestTx_ZMembers err")
-		}
-
-		if _, ok := nodes[key1]; !ok {
-			t.Error("TestTx_ZMembers err")
-		}
-		if _, ok := nodes[key2]; !ok {
-			t.Error("TestTx_ZMembers err")
-		}
-		if _, ok := nodes[key3]; !ok {
-			t.Error("TestTx_ZMembers err")
-		}
-	}
-
-	if _, err := tx.ZMembers(bucket); err == nil {
-		t.Error("TestTx_ZMembers err")
-	}
-}
-
-func TestTx_ZCard(t *testing.T) {
-	bucket, _, _, _ := InitDataForZSet(t)
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if num, err := tx.ZCard(bucket); err != nil {
-		fmt.Println("err", err)
-		tx.Rollback()
-		t.Fatal("TestTx_ZCard err")
-	} else {
-		if num != 3 {
-			t.Error("TestTx_ZCard err")
-		}
-	}
-
-	tx.Commit()
-
-	if _, err := tx.ZCard(bucket); err == nil {
-		t.Error("TestTx_ZCard err")
-	}
-}
-
-func TestTx_ZCount(t *testing.T) {
-	bucket, _, _, _ := InitDataForZSet(t)
-
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	num, err := tx.ZCount(bucket, 90, 100, nil)
-	if err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	} else {
-		if num != 2 {
-			tx.Rollback()
-			t.Fatal("TestTx_ZCount err")
-		}
-
-		num, err := tx.ZCount("bucket_fake", 90, 100, nil)
-		if err == nil || num != 0 {
-			tx.Rollback()
-			t.Fatal("TestTx_ZCount err")
-		}
-
-		tx.Commit()
-	}
-
-	num, err = tx.ZCount(bucket, 90, 100, nil)
-	if err == nil || num != 0 {
-		t.Error("TestTx_ZCount err")
-	}
-}
-
-func TestTx_ZPopMax(t *testing.T) {
-	bucket, _, _, _ := InitDataForZSet(t)
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	node, err := tx.ZPopMax(bucket)
-	if err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	}
-
-	if node.Key() != "key3" || node.Score() != 99 {
-		tx.Rollback()
-		t.Fatal("TestTx_ZPopMax err")
-	} else {
-		_, err := tx.ZPopMax("bucket_fake")
-		if err == nil {
-			tx.Rollback()
-			t.Fatal("TestTx_ZPopMax err")
-		}
-		tx.Commit()
-	}
-
-	node, err = tx.ZPopMax(bucket)
-	if err == nil {
-		t.Fatal("TestTx_ZPopMax err")
-	}
-}
-
-func TestTx_ZPopMin(t *testing.T) {
-	bucket, _, _, _ := InitDataForZSet(t)
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	node, err := tx.ZPopMin(bucket)
-	if err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	}
-
-	if node.Key() != "key1" || node.Score() != 79 {
-		tx.Rollback()
-		t.Fatal("TestTx_ZPopMin err")
-	} else {
-		_, err := tx.ZPopMin("bucket_fake")
-		if err == nil {
-			tx.Rollback()
-			t.Fatal("TestTx_ZPopMin err")
-		}
-		tx.Commit()
-	}
-
-	node, err = tx.ZPopMin(bucket)
-	if err == nil {
-		t.Fatal("TestTx_ZPopMin err")
-	}
-}
-
-func TestTx_ZPickMax(t *testing.T) {
-	bucket, _, _, _ := InitDataForZSet(t)
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	node, err := tx.ZPeekMax("bucket_fake")
-	if err == nil || node != nil {
-		t.Error("TestTx_ZPickMax err")
-	}
-
-	node, err = tx.ZPeekMax(bucket)
-	if err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	} else {
-		tx.Commit()
-
-		if node.Key() != "key3" {
-			t.Error("TestTx_ZPickMax err")
-		}
-
-		node, err = tx.ZPeekMax(bucket)
-		if err == nil || node != nil {
-			t.Error("TestTx_ZPickMax err")
-		}
-	}
-}
-
-func TestTx_ZPickMin(t *testing.T) {
-	bucket, _, _, _ := InitDataForZSet(t)
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	node, err := tx.ZPeekMin("bucket_fake")
-	if err == nil || node != nil {
-		t.Error("TestTx_ZPickMin err")
-	}
-
-	node, err = tx.ZPeekMin(bucket)
-	if err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	} else {
-		tx.Commit()
-
-		if node.Key() != "key1" {
-			t.Error("TestTx_ZPickMin err")
-		}
-
-		node, err = tx.ZPeekMin(bucket)
-		if err == nil || node != nil {
-			t.Error("TestTx_ZPickMin err")
-		}
-	}
-}
-
-func TestTx_ZRangByRank(t *testing.T) {
-	bucket, key1, key2, _ := InitDataForZSet(t)
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var expectResult map[string]struct{}
-	expectResult = make(map[string]struct{})
-	expectResult[key1] = struct{}{}
-	expectResult[key2] = struct{}{}
-
-	nodes, err := tx.ZRangeByRank("bucket_fake", 1, 2)
-	if err == nil || nodes != nil {
-		t.Error("TestTx_ZRangByRank err")
-	}
-
-	nodes, err = tx.ZRangeByRank(bucket, 1, 2)
-	if err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	} else {
-		tx.Commit()
-
-		if len(nodes) != 2 {
-			t.Error("TestTx_ZRangByRank err")
-		}
-
-		for _, node := range nodes {
-			if _, ok := expectResult[node.Key()]; !ok {
-				t.Error("TestTx_ZRangByRank err")
-			}
-		}
-
-		nodes, err = tx.ZRangeByRank(bucket, 1, 3)
-		if err == nil || nodes != nil {
-			t.Error("TestTx_ZRangByRank err")
-		}
-	}
-}
-
-func TestTx_ZRem(t *testing.T) {
-	bucket, key1, key2, _ := InitDataForZSet(t)
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err := tx.ZRem("bucket_fake", key1)
-	if err == nil {
-		t.Error("TestTx_ZRem err")
-	}
-
-	err = tx.ZRem(bucket, key1)
-	if err != nil {
-		t.Error("TestTx_ZRem err")
-	}
-
-	err = tx.ZRem(bucket, key1)
-	if err != nil {
-		t.Error("TestTx_ZRem err")
-	}
-
-	tx.Commit()
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	n, err := tx.ZGetByKey(bucket, []byte(key1))
-	if n != nil || err == nil {
-		t.Error("TestTx_ZRem err")
-	}
-
-	n, err = tx.ZGetByKey(bucket, []byte(key2))
-	if n == nil || err != nil {
-		t.Error("TestTx_ZRem err")
-	}
-
-	tx.Commit()
-
-	err = tx.ZRem(bucket, "key2")
-	if err == nil {
-		t.Error("TestTx_ZRem err")
-	}
-}
-
-func TestTx_ZRemRangeByRank(t *testing.T) {
-	bucket, key1, key2, key3 := InitDataForZSet(t)
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err := tx.ZRemRangeByRank("bucket_fake", 1, 2)
-	if err == nil {
-		t.Error("TestTx_ZRemRangeByRank err")
-	}
-
-	err = tx.ZRemRangeByRank(bucket, 1, 2)
-	if err != nil {
-		t.Error(err)
-	}
-
-	tx.Commit()
-
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	dict, err := tx.ZMembers(bucket)
-	if err != nil {
-		t.Error("TestTx_ZRemRangeByRank err")
-	}
-
-	if _, ok := dict[key3]; !ok {
-		t.Error("TestTx_ZRemRangeByRank err")
-	}
-
-	if _, ok := dict[key2]; ok {
-		t.Error("TestTx_ZRemRangeByRank err")
-	}
-
-	if _, ok := dict[key1]; ok {
-		t.Error("TestTx_ZRemRangeByRank err")
-	}
-
-	tx.Commit()
-
-	tx, err = db.Begin(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = tx.ZRemRangeByRank(bucket, 1, 2)
-
-	if err != nil {
-		t.Error("TestTx_ZRemRangeByRank err")
-	}
-
-	tx.Commit()
-
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if items, err := tx.ZMembers(bucket); err != nil && items != nil {
-		t.Error("TestTx_ZRemRangeByRank err")
-	}
-	tx.Commit()
-
-	err = tx.ZRemRangeByRank(bucket, 1, 2)
-	if err == nil {
-		t.Error("TestTx_ZRemRangeByRank err")
-	}
-}
-
-func TestTx_ZRank(t *testing.T) {
-	bucket, key1, key2, key3 := InitDataForZSet(t)
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rank, err := tx.ZRank("bucket_fake", []byte(key1))
-	if err == nil || rank != 0 {
-		t.Error("TestTx_ZRank err")
-	}
-
-	rank, err = tx.ZRank(bucket, []byte(key1))
-	if err != nil || rank != 1 {
-		t.Error("TestTx_ZRank err")
-	}
-	rank, err = tx.ZRank(bucket, []byte(key2))
-	if err != nil || rank != 2 {
-		t.Error("TestTx_ZRank err")
-	}
-	rank, err = tx.ZRank(bucket, []byte(key3))
-	if err != nil || rank != 3 {
-		t.Error("TestTx_ZRank err")
-	}
-
-	tx.Commit()
-
-	rank, err = tx.ZRank(bucket, []byte(key3))
-	if err == nil || rank == 3 {
-		t.Error("TestTx_ZRank err")
-	}
-}
-
-func TestTx_ZRevRank(t *testing.T) {
-	bucket, key1, key2, key3 := InitDataForZSet(t)
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rank, err := tx.ZRevRank("bucket_fake", []byte(key1))
-	if err == nil || rank != 0 {
-		t.Error("TestTx_ZRevRank err")
-	}
-
-	rank, err = tx.ZRevRank(bucket, []byte(key1))
-	if err != nil || rank != 3 {
-		t.Error("TestTx_ZRevRank err")
-	}
-	rank, err = tx.ZRevRank(bucket, []byte(key2))
-	if err != nil || rank != 2 {
-		t.Error("TestTx_ZRevRank err")
-	}
-	rank, err = tx.ZRevRank(bucket, []byte(key3))
-	if err != nil || rank != 1 {
-		t.Error("TestTx_ZRevRank err")
-	}
-
-	tx.Commit()
-
-	rank, err = tx.ZRevRank(bucket, []byte(key3))
-	if err == nil || rank == 1 {
-		t.Error("TestTx_ZRevRank err")
-	}
+		txZCard(t, db, bucket, GetTestBytes(0), 10, nil)
+	})
 }
 
 func TestTx_ZScore(t *testing.T) {
-	bucket, key1, _, _ := InitDataForZSet(t)
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	bucket := "bucket"
 
-	score, err := tx.ZScore(bucket, []byte(key1))
-	if err != nil || score != 79 {
-		t.Error("TestTx_ZScore err")
-	}
-	score, err = tx.ZScore("bucket_fake", []byte(key1))
-	if err == nil || score != 0 {
-		t.Error("TestTx_ZScore err")
-	}
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		for i := 0; i < 10; i++ {
+			txZAdd(t, db, bucket, GetTestBytes(0), GetTestBytes(i), float64(i), nil, nil)
+		}
 
-	score, err = tx.ZScore(bucket, []byte("key_fake"))
-	if err == nil || score != 0 {
-		t.Error("TestTx_ZScore err")
-	}
+		for i := 0; i < 10; i++ {
+			txZScore(t, db, bucket, GetTestBytes(0), GetTestBytes(i), float64(i), nil)
+		}
 
-	tx.Commit()
+		txZScore(t, db, bucket, GetTestBytes(0), GetTestBytes(10), float64(10), ErrSortedSetMemberNotExist)
+		txZScore(t, db, bucket, GetTestBytes(1), GetTestBytes(0), float64(0), ErrSortedSetNotFound)
 
-	score, err = tx.ZScore(bucket, []byte(key1))
-	if err == nil || score != 0 {
-		t.Error("TestTx_ZScore err")
-	}
+		// update the score of member
+		txZAdd(t, db, bucket, GetTestBytes(0), GetTestBytes(5), float64(999), nil, nil)
+		txZScore(t, db, bucket, GetTestBytes(0), GetTestBytes(5), 999, nil)
+	})
 }
 
-func TestTx_ZGetByKey(t *testing.T) {
-	bucket, key1, _, _ := InitDataForZSet(t)
-	tx, err = db.Begin(false)
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestTx_ZRem(t *testing.T) {
+	bucket := "bucket"
 
-	node, err := tx.ZGetByKey(bucket, []byte(key1))
-	if err != nil || node.Key() != key1 {
-		t.Error("TestTx_ZGetByKey err")
-	}
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		for i := 0; i < 10; i++ {
+			txZAdd(t, db, bucket, GetTestBytes(0), GetTestBytes(i), float64(i), nil, nil)
+		}
 
-	node, err = tx.ZGetByKey("bucket_fake", []byte(key1))
-	if err == nil || node != nil {
-		t.Error("TestTx_ZGetByKey err")
-	}
+		txZScore(t, db, bucket, GetTestBytes(0), GetTestBytes(3), float64(3), nil)
 
-	node, err = tx.ZGetByKey(bucket, []byte("key_fake"))
-	if err == nil || node != nil {
-		t.Error("TestTx_ZGetByKey err")
-	}
+		// normal remove
+		txZRem(t, db, bucket, GetTestBytes(0), GetTestBytes(3), nil)
+		txZScore(t, db, bucket, GetTestBytes(0), GetTestBytes(3), float64(3), ErrSortedSetMemberNotExist)
 
-	tx.Commit()
-	node, err = tx.ZGetByKey(bucket, []byte(key1))
-	if err == nil || node != nil {
-		t.Error("TestTx_ZGetByKey err")
-	}
+		txZCard(t, db, bucket, GetTestBytes(0), 9, nil)
+
+		// remove a fake member
+		txZRem(t, db, bucket, GetTestBytes(0), GetTestBytes(10), ErrSortedSetMemberNotExist)
+
+		// remove from a fake zset
+		txZRem(t, db, bucket, GetTestBytes(1), GetTestBytes(0), ErrSortedSetNotFound)
+	})
+}
+
+func TestTx_ZMembers(t *testing.T) {
+
+	bucket := "bucket"
+	key := GetTestBytes(0)
+
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		for i := 0; i < 10; i++ {
+			txZAdd(t, db, bucket, key, GetTestBytes(i), float64(i), nil, nil)
+		}
+
+		err := db.View(func(tx *Tx) error {
+			members, err := tx.ZMembers(bucket, key)
+			require.NoError(t, err)
+
+			require.Len(t, members, 10)
+
+			for member := range members {
+				require.Equal(t, GetTestBytes(int(member.Score)), member.Value)
+			}
+
+			return nil
+		})
+		require.NoError(t, err)
+	})
+}
+
+func TestTx_ZCount(t *testing.T) {
+
+	bucket := "bucket"
+	key := GetTestBytes(0)
+
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		for i := 0; i < 30; i++ {
+			txZAdd(t, db, bucket, key, GetRandomBytes(24), float64(i), nil, nil)
+		}
+
+		err := db.View(func(tx *Tx) error {
+
+			count, err := tx.ZCount(bucket, key, 10, 20, nil)
+			require.NoError(t, err)
+			require.Equal(t, 11, count)
+
+			return nil
+		})
+		require.NoError(t, err)
+	})
+}
+
+func TestTx_ZPop(t *testing.T) {
+	bucket := "bucket"
+	key := GetTestBytes(0)
+
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+
+		txZPop(t, db, bucket, key, true, nil, 0, ErrBucket)
+		txZPop(t, db, bucket, key, false, nil, 0, ErrBucket)
+
+		txZAdd(t, db, bucket, key, GetTestBytes(0), float64(0), nil, nil)
+		txZRem(t, db, bucket, key, GetTestBytes(0), nil)
+
+		txZPop(t, db, bucket, key, true, nil, 0, ErrSortedSetIsEmpty)
+		txZPop(t, db, bucket, key, false, nil, 0, ErrSortedSetIsEmpty)
+
+		for i := 0; i < 30; i++ {
+			txZAdd(t, db, bucket, key, GetTestBytes(i), float64(i), nil, nil)
+		}
+
+		txZPop(t, db, bucket, key, true, GetTestBytes(29), float64(29), nil)
+		txZPop(t, db, bucket, key, false, GetTestBytes(0), 0, nil)
+
+		txZPop(t, db, bucket, key, true, GetTestBytes(28), float64(28), nil)
+		txZPop(t, db, bucket, key, false, GetTestBytes(1), 1, nil)
+	})
+}
+
+func TestTx_ZRangeByRank(t *testing.T) {
+	bucket := "bucket"
+	key := GetTestBytes(0)
+
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+
+		err := db.View(func(tx *Tx) error {
+			_, err := tx.ZRangeByRank(bucket, key, 1, 10)
+			require.Error(t, err)
+			return nil
+		})
+		require.NoError(t, err)
+
+		for i := 0; i < 10; i++ {
+			txZAdd(t, db, bucket, key, GetTestBytes(i), float64(i), nil, nil)
+		}
+
+		err = db.View(func(tx *Tx) error {
+			members, err := tx.ZRangeByRank(bucket, key, 1, 10)
+			require.NoError(t, err)
+			require.Len(t, members, 10)
+			return nil
+		})
+		require.NoError(t, err)
+
+		err = db.View(func(tx *Tx) error {
+			members, err := tx.ZRangeByRank(bucket, key, 3, 6)
+			require.NoError(t, err)
+			require.Len(t, members, 4)
+			return nil
+		})
+		require.NoError(t, err)
+
+		err = db.View(func(tx *Tx) error {
+			members, err := tx.ZRangeByRank(bucket, key, -1, 11)
+			require.NoError(t, err)
+			require.Len(t, members, 1)
+			return nil
+		})
+		require.NoError(t, err)
+
+		err = db.View(func(tx *Tx) error {
+			members, err := tx.ZRangeByRank(bucket, key, 8, 4)
+			require.NoError(t, err)
+			require.Len(t, members, 5)
+
+			for i, member := range members {
+				require.Equal(t, member.Score, float64(7-i))
+				require.Equal(t, member.Value, GetTestBytes(7-i))
+			}
+
+			return nil
+		})
+		require.NoError(t, err)
+	})
+}
+
+func TestTx_ZRemRangeByRank(t *testing.T) {
+	bucket := "bucket"
+	key := GetTestBytes(0)
+
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+
+		err := db.Update(func(tx *Tx) error {
+			err := tx.ZRemRangeByRank(bucket, key, 1, 10)
+			assert.Error(t, err)
+			return nil
+		})
+		assert.NoError(t, err)
+
+		for i := 0; i < 10; i++ {
+			txZAdd(t, db, bucket, key, GetTestBytes(i), float64(i), nil, nil)
+		}
+
+		err = db.Update(func(tx *Tx) error {
+			err := tx.ZRemRangeByRank(bucket, key, 1, 10)
+			assert.NoError(t, err)
+			return nil
+		})
+		assert.NoError(t, err)
+
+		txZCard(t, db, bucket, key, 0, nil)
+
+		for i := 0; i < 10; i++ {
+			txZAdd(t, db, bucket, key, GetTestBytes(i), float64(i), nil, nil)
+		}
+
+		err = db.Update(func(tx *Tx) error {
+			err := tx.ZRemRangeByRank(bucket, key, 1, 2)
+			assert.NoError(t, err)
+			return nil
+		})
+
+		for i := 0; i < 2; i++ {
+			txZScore(t, db, bucket, key, GetTestBytes(0), 0, ErrSortedSetMemberNotExist)
+		}
+
+		err = db.Update(func(tx *Tx) error {
+			card, err := tx.ZCard(bucket, key)
+			assert.NoError(t, err)
+			assert.Equal(t, 8, card)
+
+			err = tx.ZRemRangeByRank(bucket, key, 6, 8)
+			assert.NoError(t, err)
+			return nil
+		})
+
+		for i := 5; i < 8; i++ {
+			txZScore(t, db, bucket, key, GetTestBytes(0), 0, ErrSortedSetMemberNotExist)
+		}
+
+		err = db.Update(func(tx *Tx) error {
+			card, err := tx.ZCard(bucket, key)
+			assert.NoError(t, err)
+			assert.Equal(t, 5, card)
+
+			err = tx.ZRemRangeByRank(bucket, key, 4, 3)
+			assert.NoError(t, err)
+			return nil
+		})
+
+		for i := 2; i < 4; i++ {
+			txZScore(t, db, bucket, key, GetTestBytes(0), 0, ErrSortedSetMemberNotExist)
+		}
+
+		assert.NoError(t, err)
+	})
+}
+
+func TestTx_ZRank(t *testing.T) {
+	bucket := "bucket"
+	key := GetTestBytes(0)
+
+	runNutsDBTest(t, nil, func(t *testing.T, db *DB) {
+		txZRank(t, db, bucket, key, GetTestBytes(0), true, 0, ErrBucket)
+		txZRank(t, db, bucket, key, GetTestBytes(0), false, 0, ErrBucket)
+
+		for i := 0; i < 10; i++ {
+			txZAdd(t, db, bucket, key, GetTestBytes(i), float64(i), nil, nil)
+		}
+
+		txZRank(t, db, bucket, key, GetTestBytes(0), true, 10, nil)
+		txZRank(t, db, bucket, key, GetTestBytes(0), false, 1, nil)
+
+		txZRem(t, db, bucket, key, GetTestBytes(0), nil)
+
+		txZRank(t, db, bucket, key, GetTestBytes(0), true, 10, ErrSortedSetMemberNotExist)
+		txZRank(t, db, bucket, key, GetTestBytes(0), false, 1, ErrSortedSetMemberNotExist)
+
+		txZRem(t, db, bucket, key, GetTestBytes(3), nil)
+
+		txZRank(t, db, bucket, key, GetTestBytes(4), true, 6, nil)
+		txZRank(t, db, bucket, key, GetTestBytes(4), false, 3, nil)
+	})
+}
+
+func TestTx_ZSetEntryIdxMode_HintKeyValAndRAMIdxMode(t *testing.T) {
+	bucket := "bucket"
+	key := GetTestBytes(0)
+	value := GetRandomBytes(24)
+
+	opts := DefaultOptions
+	opts.EntryIdxMode = HintKeyValAndRAMIdxMode
+
+	// HintKeyValAndRAMIdxMode
+	runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+		err := db.Update(func(tx *Tx) error {
+			err := tx.ZAdd(bucket, key, float64(0), value)
+			require.NoError(t, err)
+
+			return nil
+		})
+		require.NoError(t, err)
+
+		zset := db.Index.sortedSet.getWithDefault(bucket, db).M[string(key)]
+		hash, _ := getFnv32(value)
+		node := zset.dict[hash]
+
+		require.NotNil(t, node.record.V)
+		require.Equal(t, value, node.record.V)
+	})
+}
+
+func TestTx_ZSetEntryIdxMode_HintKeyAndRAMIdxMode(t *testing.T) {
+	bucket := "bucket"
+	key := GetTestBytes(0)
+	value := GetRandomBytes(24)
+
+	opts := DefaultOptions
+	opts.EntryIdxMode = HintKeyAndRAMIdxMode
+
+	// HintKeyValAndRAMIdxMode
+	runNutsDBTest(t, &opts, func(t *testing.T, db *DB) {
+		err := db.Update(func(tx *Tx) error {
+			err := tx.ZAdd(bucket, key, float64(0), value)
+			require.NoError(t, err)
+
+			return nil
+		})
+		require.NoError(t, err)
+
+		zset := db.Index.sortedSet.getWithDefault(bucket, db).M[string(key)]
+		hash, _ := getFnv32(value)
+		node := zset.dict[hash]
+
+		require.NotNil(t, node.record.H)
+		require.Nil(t, node.record.V)
+
+		v, err := db.getValueByRecord(node.record)
+		require.NoError(t, err)
+		require.Equal(t, value, v)
+	})
 }

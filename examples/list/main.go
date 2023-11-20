@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/xujiajun/nutsdb"
+	"github.com/nutsdb/nutsdb"
 )
 
 var (
@@ -16,7 +16,6 @@ var (
 )
 
 func init() {
-	opt := nutsdb.DefaultOptions
 	fileDir := "/tmp/nutsdb_example"
 
 	files, _ := ioutil.ReadDir(fileDir)
@@ -29,9 +28,11 @@ func init() {
 			}
 		}
 	}
-	opt.Dir = fileDir
-	opt.SegmentSize = 1024 * 1024 // 1MB
-	db, err = nutsdb.Open(opt)
+	db, _ = nutsdb.Open(
+		nutsdb.DefaultOptions,
+		nutsdb.WithDir(fileDir),
+		nutsdb.WithSegmentSize(1024*1024), // 1MB
+	)
 	if err != nil {
 		panic(err)
 	}
@@ -53,8 +54,6 @@ func main() {
 
 	testLRange()
 
-	testLSet()
-
 	testLPeek()
 
 	testRPeek()
@@ -64,6 +63,10 @@ func main() {
 	testLRange()
 
 	testLSize()
+
+	testLRemByIndex()
+
+	testLKeys()
 }
 
 func testRPushAndLPush() {
@@ -140,12 +143,13 @@ func testLPop() {
 			if err != nil {
 				return err
 			}
-			fmt.Println("LPop item:", string(item)) //val1
+			fmt.Println("LPop item:", string(item)) // val1
 			return nil
 		}); err != nil {
 		log.Fatal(err)
 	}
 }
+
 func testRPop() {
 	if err := db.Update(
 		func(tx *nutsdb.Tx) error {
@@ -154,7 +158,7 @@ func testRPop() {
 			if err != nil {
 				return err
 			}
-			fmt.Println("RPop item:", string(item)) //val2
+			fmt.Println("RPop item:", string(item)) // val2
 			return nil
 		}); err != nil {
 		log.Fatal(err)
@@ -201,12 +205,11 @@ func testRPushItems() {
 func testLRem() {
 	value := []byte("val2")
 	count := -1
-	//count := 1
+	// count := 1
 	if err := db.Update(
 		func(tx *nutsdb.Tx) error {
 			key := []byte("myList")
-			num, err := tx.LRem(bucket, key, count, value)
-			fmt.Println("removed num: ", num)
+			err := tx.LRem(bucket, key, count, value)
 			return err
 		}); err != nil {
 		log.Fatal(err)
@@ -215,21 +218,6 @@ func testLRem() {
 		count = -count
 	}
 	fmt.Println("LRem count : ", count, string(value))
-}
-
-func testLSet() {
-	if err := db.Update(
-		func(tx *nutsdb.Tx) error {
-			key := []byte("myList")
-			err := tx.LSet(bucket, key, 0, []byte("val11"))
-			if err != nil {
-				return err
-			}
-			fmt.Println("LSet ok, index 0 item value => val11")
-			return nil
-		}); err != nil {
-		log.Fatal(err)
-	}
 }
 
 func testLPeek() {
@@ -241,12 +229,11 @@ func testLPeek() {
 				return err
 			}
 
-			fmt.Println("LPeek item:", string(item)) //val11
+			fmt.Println("LPeek item:", string(item)) // val11
 			return nil
 		}); err != nil {
 		log.Fatal(err)
 	}
-
 }
 
 func testRPeek() {
@@ -258,7 +245,7 @@ func testRPeek() {
 				return err
 			}
 
-			fmt.Println("RPeek item:", string(item)) //val2
+			fmt.Println("RPeek item:", string(item)) // val2
 			return nil
 		}); err != nil {
 		log.Fatal(err)
@@ -286,6 +273,33 @@ func testLSize() {
 
 			fmt.Println("myList size is ", size)
 			return nil
+		}); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func testLRemByIndex() {
+	if err := db.Update(
+		func(tx *nutsdb.Tx) error {
+			key := []byte("myList")
+			err := tx.LRemByIndex(bucket, key, 0)
+			return err
+		}); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func testLKeys() {
+	if err := db.View(
+		func(tx *nutsdb.Tx) error {
+			var keys []string
+			err := tx.LKeys(bucket, "*", func(key string) bool {
+				keys = append(keys, key)
+				// true: continue, false: break
+				return true
+			})
+			fmt.Printf("keys: %v\n", keys)
+			return err
 		}); err != nil {
 		log.Fatal(err)
 	}

@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/xujiajun/nutsdb"
+	"github.com/nutsdb/nutsdb"
 	"github.com/xujiajun/utils/strconv2"
 )
 
@@ -76,17 +76,17 @@ func removeFileDir(fileDir string) {
 
 func main() {
 	removeFlag := false
-
-	opt := nutsdb.DefaultOptions
 	fileDir := "/tmp/nutsdb_example_concurrence"
 
 	if removeFlag {
 		removeFileDir(fileDir)
 	}
 
-	opt.Dir = fileDir
-	opt.SegmentSize = 1024 * 1024 // 1MB
-	db, err = nutsdb.Open(opt)
+	db, err = nutsdb.Open(
+		nutsdb.DefaultOptions,
+		nutsdb.WithDir(fileDir),
+		nutsdb.WithSegmentSize(1024*1024), // 1MB
+	)
 	if err != nil {
 		panic(err)
 	}

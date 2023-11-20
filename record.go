@@ -14,12 +14,15 @@
 
 package nutsdb
 
-import "time"
+import (
+	"time"
+)
 
 // Record records entry and hint.
 type Record struct {
-	H *Hint
-	E *Entry
+	H      *Hint
+	V      []byte
+	Bucket string
 }
 
 // IsExpired returns the record if expired or not.
@@ -29,18 +32,44 @@ func (r *Record) IsExpired() bool {
 
 // IsExpired checks the ttl if expired or not.
 func IsExpired(ttl uint32, timestamp uint64) bool {
-	now := time.Now().Unix()
-	if ttl > 0 && uint64(ttl)+timestamp > uint64(now) || ttl == Persistent {
+	if ttl == Persistent {
 		return false
 	}
 
-	return true
+	now := time.UnixMilli(time.Now().UnixMilli())
+	expireTime := time.UnixMilli(int64(timestamp))
+	expireTime = expireTime.Add(time.Duration(ttl) * time.Second)
+
+	return expireTime.Before(now)
 }
 
 // UpdateRecord updates the record.
-func (r *Record) UpdateRecord(h *Hint, e *Entry) error {
-	r.E = e
+func (r *Record) UpdateRecord(h *Hint, v []byte) error {
+	r.V = v
 	r.H = h
 
 	return nil
+}
+
+// NewRecord generate a record Obj
+func NewRecord() *Record {
+	return new(Record)
+}
+
+// WithHint set the Hint to Record
+func (r *Record) WithHint(hint *Hint) *Record {
+	r.H = hint
+	return r
+}
+
+// WithValue set the Value to Record
+func (r *Record) WithValue(v []byte) *Record {
+	r.V = v
+	return r
+}
+
+// WithBucket set the Bucket to Record
+func (r *Record) WithBucket(bucket string) *Record {
+	r.Bucket = bucket
+	return r
 }
